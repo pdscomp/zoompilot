@@ -186,8 +186,8 @@ procs += [
   NativeProcess("locationd_llk", "openpilot/sunnypilot/selfdrive/locationd", ["./locationd"], only_onroad),
 ]
 
-if os.path.exists("./github_runner.sh"):
-  procs += [NativeProcess("github_runner_start", "openpilot/system/manager",
+if os.path.exists("../../../release/ci/github_runner.sh"):
+  procs += [NativeProcess("github_runner_start", "release/ci",
                           ["./github_runner.sh", "start"], and_(only_offroad, use_github_runner), sigkill=False)]
 
 if os.path.exists("../../sunnypilot/sunnylink/uploader.py"):

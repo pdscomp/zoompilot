@@ -187,7 +187,7 @@ class TorqueEstimator(ParameterEstimator, TorqueEstimatorExt):
     elif which == "extrinsicsCalibration":
       self.calibrator.feed_extrinsics_calibration(msg)
     elif which == "lateralDelay":
-      self.lag = get_lat_delay(self.params, msg.lateralDelay, self.CP.steerActuatorDelay)
+      self.lag = get_lat_delay(self.params, msg.lateralDelay)
     # calculate lateral accel from past steering torque
     elif which == "deviceMotion":
       is_valid = msg.angularVelocityDevice.valid and msg.orientationNED.valid and msg.inputsOK and msg.sensorsOK and msg.posenetOK
@@ -251,7 +251,7 @@ class TorqueEstimator(ParameterEstimator, TorqueEstimatorExt):
     lateralTorqueParameters.calPerc = self.filtered_points.get_valid_percent()
     lateralTorqueParameters.decay = self.decay
     lateralTorqueParameters.maxResets = self.resets
-    self._extend_msg(lateralTorqueParameters, with_points)
+    self._extend_msg(msg, with_points)
     return msg
 
 

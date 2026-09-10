@@ -7,6 +7,7 @@ See the LICENSE.md file in the root directory for more details.
 
 import numpy as np
 
+from opendbc.sunnypilot.car.interfaces import get_steer_rail_schedule
 from openpilot.sunnypilot.selfdrive.controls.lib.nnlc.nnlc import NeuralNetworkLateralControl
 from openpilot.sunnypilot.selfdrive.controls.lib.latcontrol_torque_ext_override import LatControlTorqueExtOverride
 
@@ -16,13 +17,60 @@ class LatControlTorqueExt(NeuralNetworkLateralControl, LatControlTorqueExtOverri
     NeuralNetworkLateralControl.__init__(self, lac_torque, CP, CP_SP, CI)
     LatControlTorqueExtOverride.__init__(self, CP)
     self._output_overrides_disabled = False
+    # EPS ceiling as a fraction of the carcontroller's scale, by speed (None: full scale
+    # everywhere). Applied to the host as steer_max, so every tune's own update_limits() and
+    # saturation test land on the rail with no tune changes. See docs/zoompilot/lateral-tune.md.
+    self.steer_rail_schedule = get_steer_rail_schedule(CP)
+    # this frame's command, for controlsd_ext: update() only runs on active frames, so the
+    # per-frame update_override_torque_params call clears the mark and update() sets it
+    self._commanded = False
+    # what the carcontroller reported back, pushed by controlsd_ext after its classifier
+    self._applied_torque = 0.0
+    self._at_rail = False
+
+  def rail_scale_at(self, v_ego: float) -> float:
+    if self.steer_rail_schedule is None:
+      return 1.0
+    return float(np.interp(v_ego, self.steer_rail_schedule[0], self.steer_rail_schedule[1]))
+
+  @property
+  def commanded_torque(self) -> float:
+    """This frame's CC.actuators.torque, in the actuator's sign convention: the tunes
+    return -output_torque and controlsd publishes that; a frame the tune ran inactive
+    commanded 0.0."""
+    return -self._output_torque if self._commanded else 0.0
+
+  @property
+  def last_error(self) -> float:
+    """pid_log.error of the frame just computed (the tune sets it before calling update())."""
+    return float(self._pid_log.error) if self._pid_log is not None else 0.0
+
+  @property
+  def integrator(self) -> float:
+    return float(self._pid.i)
+
+  def set_actuator_state(self, applied_torque: float, at_rail: bool) -> None:
+    self._applied_torque = applied_torque
+    self._at_rail = at_rail
+
+  def update_override_torque_params(self, torque_params) -> bool:
+    self._commanded = False
+    changed = LatControlTorqueExtOverride.update_override_torque_params(self, torque_params)
+    if self.steer_rail_schedule is not None:
+      # _last_vego is the previous active frame's speed, like the speed-dep interp. The host's
+      # limits scale linearly in steer_max only for a linear lateral_accel_from_torque; a
+      # non-linear interface (NNLC-style torque models) would need its own rail handling.
+      rail = self.rail_scale_at(self._last_vego)
+      if rail != self.lac_torque.steer_max:
+        self.lac_torque.steer_max = rail
+        changed = True
+    return changed
 
   def disable_output_overrides(self):
-    """Permanently neutralize the override controllers (jerk-aware, NNLC, and any future
-    sibling) for a host controller that owns its own friction shaping and integrator
-    policy. Speed-dependent torque (update_override_torque_params) is unaffected. The
-    caller must re-run the host's update_limits(): an override controller may already
-    have retuned the shared PID to torque-space limits at construction."""
+    """Permanently neutralize the override controllers (jerk-aware, NNLC) for a host that owns
+    its own friction shaping and integrator policy. Speed-dependent torque is unaffected. The
+    caller must re-run the host's update_limits(): an override controller may already have
+    retuned the shared PID to torque-space limits at construction."""
     self._output_overrides_disabled = True
 
   @property
@@ -40,6 +88,7 @@ class LatControlTorqueExt(NeuralNetworkLateralControl, LatControlTorqueExtOverri
              desired_curvature, actual_curvature, steer_limited_by_safety, output_torque):
     # Store vEgo for update_override_torque_params (which runs before this, next frame)
     self._last_vego = CS.vEgo
+    self._commanded = True
     self._ff = ff
     self._pid = pid
     self._pid_log = pid_log
@@ -65,9 +114,8 @@ class LatControlTorqueExt(NeuralNetworkLateralControl, LatControlTorqueExtOverri
     return self._pid_log, self._output_torque
 
   def disable_speed_dep_torque(self):
-    """The single speed-dep deactivation path. Restores the CP tune so the controller
-    doesn't keep running on the last interpolated values forever — matching what
-    upstream does when useParams is false (live params simply stop applying)."""
+    """The single speed-dep deactivation path. Restores the CP tune so the controller does not
+    keep running on the last interpolated values, as upstream does when useParams is false."""
     if not self._speed_dep_active:
       return
     self._speed_dep_active = False
@@ -77,22 +125,22 @@ class LatControlTorqueExt(NeuralNetworkLateralControl, LatControlTorqueExtOverri
     self.lac_torque.torque_params.friction = tune.friction
     self.lac_torque.update_limits()
 
-  def update_speed_dep_torque(self, tp):
-    """Apply speed-dependent learned values from torqued.
-    Uses learned values for valid bins. For invalid bins, falls back to
-    TOML seed values if available for this car, otherwise global filtered.
-    A message with useParams off or no bins deactivates uniformly — both are
-    "torqued no longer stands behind these values" and must not leave the
-    controller on stale tables (useParams flips off mid-drive when the driver
-    enables the manual override)."""
-    if not tp.useParams or not tp.speedBinCenters:
+  def update_speed_dep_torque(self, tp, tp_sp):
+    """Apply torqued's per-bin values: learned values for valid bins, the car's TOML seeds or
+    the global filtered values for the rest. tp is upstream's lateralTorqueParameters (the
+    globals and useParams), tp_sp the fork's liveTorqueParametersSP published beside it
+    (the bins), or None when that service has not checked out. useParams off, no fork
+    message or no bins all mean torqued no longer stands behind the values (the manual
+    override flips useParams mid-drive), and each deactivates through
+    disable_speed_dep_torque rather than leaving stale tables."""
+    if not tp.useParams or tp_sp is None or not tp_sp.speedBinCenters:
       self.disable_speed_dep_torque()
       return
-    speed_bp = list(tp.speedBinCenters)
+    speed_bp = list(tp_sp.speedBinCenters)
 
-    factors = list(tp.speedBinLatAccelFactors)
-    frictions = list(tp.speedBinFrictions)
-    valid_bp = list(tp.speedBinValid)
+    factors = list(tp_sp.speedBinLatAccelFactors)
+    frictions = list(tp_sp.speedBinFrictions)
+    valid_bp = list(tp_sp.speedBinValid)
 
     if self._speed_dep_car_cfg is None:
       from opendbc.sunnypilot.car.interfaces import get_speed_dep_config_for_car
@@ -115,21 +163,22 @@ class LatControlTorqueExt(NeuralNetworkLateralControl, LatControlTorqueExtOverri
     self._speed_dep_lat_accel_factor_bp = [factors[i] if valid_bp[i] else fallback_factors[i] for i in range(len(speed_bp))]
     self._speed_dep_friction_bp = [frictions[i] if valid_bp[i] else fallback_frictions[i] for i in range(len(speed_bp))]
 
-    # Per-count LAF table for platforms with a speed-dependent STEER_MAX (see the
-    # per-frame interp in update_override_torque_params). Learned and seed values alike
-    # were measured under this car's schedule, so one conversion covers both. Rebuilt on
-    # every torqued message: bin validity flips move values between learned and fallback.
+    # Per-count tables for platforms with a speed-dependent STEER_MAX (see the per-frame
+    # interp in the override). Learned and seed values alike were measured under this car's
+    # schedule, so one conversion covers both; rebuilt on every message as bin validity flips.
     schedule = cfg.get('steer_max_schedule')
     self._speed_dep_steer_max_schedule = schedule
     if schedule:
       sm_bp, sm_v = schedule
-      self._speed_dep_laf_per_count_bp = [laf / float(np.interp(c, sm_bp, sm_v))
-                                          for laf, c in zip(self._speed_dep_lat_accel_factor_bp, speed_bp, strict=True)]
+      steer_max_at_bins = [float(np.interp(c, sm_bp, sm_v)) for c in speed_bp]
+      self._speed_dep_laf_per_count_bp = [laf / sm for laf, sm in zip(self._speed_dep_lat_accel_factor_bp, steer_max_at_bins, strict=True)]
+      # friction is a normalized torque, so its counts are friction * STEER_MAX, the inverse of LAF's
+      self._speed_dep_friction_per_count_bp = [fric * sm for fric, sm in zip(self._speed_dep_friction_bp, steer_max_at_bins, strict=True)]
     else:
       self._speed_dep_laf_per_count_bp = []
+      self._speed_dep_friction_per_count_bp = []
 
-    # Set global filtered values for PID limits baseline. Per-frame speed-dep
-    # interpolation in update_override_torque_params overwrites on next frame.
+    # global filtered values as the PID-limits baseline; the per-frame interp overwrites next frame
     self.lac_torque.torque_params.latAccelFactor = tp.latAccelFactorFiltered
     self.lac_torque.torque_params.latAccelOffset = tp.latAccelOffsetFiltered
     self.lac_torque.torque_params.friction = tp.frictionCoefficientFiltered

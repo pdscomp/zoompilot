@@ -24,6 +24,11 @@ ALL_STATES = (State.schema.enumerants.values())
 ENABLE_EVENT_TYPES = (ET.ENABLE, ET.OVERRIDE_LATERAL)
 
 
+# make_event borrows the lkasEnable slot in the shared mapping; restore it so later tests in
+# the session see the real event again
+LKAS_ENABLE_EVENT = EVENTS_SP[0]
+
+
 def make_event(event_types):
   event = {}
   for ev in event_types:
@@ -48,6 +53,9 @@ class TestMADSStateMachine(OpenpilotTestCase):
     self.events = self.mads.selfdrive.events
     self.events_sp = self.mads.selfdrive.events_sp
     self.mads.selfdrive.state_machine.soft_disable_timer = int(SOFT_DISABLE_TIME / DT_CTRL)
+
+  def teardown_method(self):
+    EVENTS_SP[0] = LKAS_ENABLE_EVENT
 
   def clear_events(self):
     self.events.clear()

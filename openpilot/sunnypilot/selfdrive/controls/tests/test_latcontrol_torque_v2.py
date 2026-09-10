@@ -23,7 +23,6 @@ from opendbc.car.structs import car
 from openpilot.cereal import custom
 from openpilot.common.params import Params
 from openpilot.common.prefix import OpenpilotPrefix
-from openpilot.sunnypilot.selfdrive.controls.controlsd_ext import torque_v2_mode_of
 from openpilot.sunnypilot.selfdrive.controls.lib.latcontrol_torque_v0 import LatControlTorque as LatControlTorqueV0
 from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.sunnypilot.selfdrive.controls.lib.latcontrol_torque_v2 import (
@@ -39,7 +38,7 @@ LAT_DELAY = 0.3
 DELAY_FRAMES = int(LAT_DELAY / DT)
 LAF = 2.5
 CURV_PER_DEG = 2e-4  # toy geometry: curvature = -steeringAngleDeg * CURV_PER_DEG
-MAZDA_TI_FLAGS = MazdaFlags.GEN1 | MazdaFlags.STEER_TO_ZERO | MazdaFlags.TORQUE_INTERCEPTOR
+MAZDA_TI_FLAGS = MazdaFlags.GEN1 | MazdaFlags.STEER_TO_ZERO_EPS | MazdaFlags.TORQUE_INTERCEPTOR
 
 VM = SimpleNamespace(calc_curvature=lambda angle_rad, v_ego, roll: math.degrees(angle_rad) * CURV_PER_DEG)
 LP = SimpleNamespace(angleOffsetDeg=0.0, roll=0.0)
@@ -127,26 +126,20 @@ class TestMazdaTorqueV2AB:
     assert a.pid.neg_limit == pytest.approx(b.pid.neg_limit)
 
   def test_flagless_cx5_b_is_a_but_not_applicable(self):
-    flags = MazdaFlags.GEN1 | MazdaFlags.STEER_TO_ZERO
+    flags = MazdaFlags.GEN1 | MazdaFlags.STEER_TO_ZERO_EPS
     lac = make_mazda_ti_lac(MazdaTorqueV2Mode.B, flags=flags)
     assert lac.mazda_v2_mode is None
     assert ti_lsf_scale(7.5, lac.mazda_v2_mode) == ti_lsf_scale(7.5, MazdaTorqueV2Mode.A)
-    assert torque_v2_mode_of(lac) == custom.CarControlSP.TorqueV2Mode.notApplicable
 
   def test_native_2022_is_a_but_not_applicable(self):
     lac = make_mazda_ti_lac(MazdaTorqueV2Mode.B, fingerprint="MAZDA_CX5_2022")
     assert lac.mazda_v2_mode is None
     assert ti_lsf_scale(7.5, lac.mazda_v2_mode) == ti_lsf_scale(7.5, MazdaTorqueV2Mode.A)
-    assert torque_v2_mode_of(lac) == custom.CarControlSP.TorqueV2Mode.notApplicable
 
-  @pytest.mark.parametrize(("mode", "telemetry"), [
-    (MazdaTorqueV2Mode.A, custom.CarControlSP.TorqueV2Mode.modeA),
-    (MazdaTorqueV2Mode.B, custom.CarControlSP.TorqueV2Mode.modeB),
-  ])
-  def test_recorded_cohort_reports_effective_mode(self, mode, telemetry):
+  @pytest.mark.parametrize("mode", [MazdaTorqueV2Mode.A, MazdaTorqueV2Mode.B])
+  def test_recorded_cohort_reports_effective_mode(self, mode):
     lac = make_mazda_ti_lac(mode)
     assert lac.mazda_v2_mode == mode
-    assert torque_v2_mode_of(lac) == telemetry
 
 
 class TestLatControlTorqueV2:
@@ -457,7 +450,10 @@ class TestRailLimitedPid:
   def _railed(self, rail=RAIL):
     lac = make_lac(LatControlTorqueV2)
     if rail is not None:
+      # the extension applies the rail to the host's steer_max per frame; the host keeps
+      # its own copy for the saturation alert's at-rail gating
       lac.steer_rail_schedule = ([0.0], [rail])
+      lac.extension.steer_rail_schedule = ([0.0], [rail])
     return lac
 
   def test_limits_track_the_rail(self, params):
@@ -477,8 +473,12 @@ class TestRailLimitedPid:
     the schedule read at construction."""
     lac = make_lac(LatControlTorqueV2)
     lac.steer_rail_schedule = ([5.0, 25.0], [1.0, 0.5])
+    lac.extension.steer_rail_schedule = lac.steer_rail_schedule
     step(lac, make_cs(5.0), 0.0)
     assert lac.pid.pos_limit == pytest.approx(LAF)
+    # the extension reads the previous active frame's speed, so the new ceiling applies
+    # from the second frame at the higher speed
+    step(lac, make_cs(25.0), 0.0)
     step(lac, make_cs(25.0), 0.0)
     assert lac.pid.pos_limit == pytest.approx(0.5 * LAF)
 

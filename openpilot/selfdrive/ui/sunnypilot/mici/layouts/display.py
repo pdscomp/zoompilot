@@ -1,7 +1,7 @@
 """
-Copyright (c) 2021-, Haibin Wen, sunnypilot, and a number of other contributors.
+Copyright (c) 2026-, Zeph Leggett.
 
-This file is part of sunnypilot and is licensed under the MIT License.
+This file is part of zoompilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
 
@@ -88,7 +88,7 @@ class DisplayLayoutMici(NavScroller):
     )
 
     self._screensaver = BigParamControl(tr("screen saver"), "ScreenSaverEnabled")
-    # 60-600 s in whole minutes — same range/step as the TICI screen saver duration
+    # Match the TICI screen-saver range and one-minute step.
     self._screensaver_timeout = BigParamOption(
       tr("saver duration"), "ScreenSaverTimeout",
       min_value=60, max_value=600, value_change_step=60,

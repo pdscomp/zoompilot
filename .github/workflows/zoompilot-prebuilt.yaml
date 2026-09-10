@@ -1,17 +1,20 @@
 name: zoompilot prebuilt
 
-# Cuts a release: builds develop on the self-hosted comma device and publishes the
-# compiled tree to main, which is the branch users install. main is owned by this
-# workflow and force-pushed on every release, so never commit to it by hand and never
-# merge into it; develop is the source of truth.
+# Build develop on the self-hosted comma device and publish the compiled tree to main.
+# The workflow owns and force-pushes main; develop remains the source of truth.
 #
-# Run it manually from develop (Actions > Run workflow) when you want to cut a release.
+# Start releases manually from develop through Actions > Run workflow.
 #
-# The runner only picks jobs up while the device is off the car: hardwared sets
+# The runner accepts jobs only while the device is offroad. hardwared sets
 # GithubRunnerSufficientVoltage above 9V and process_config stops the runner service
-# when it is set. Bench-power the device to let a build run.
+# when set. Use bench power for release builds.
 
 env:
+  # The runner is a comma four, but the release installs on the 3X too. Compile the model and
+  # dm warp jits for both driver cameras: the kernels are portable between them (both Adreno
+  # 630) but the jits are keyed by camera resolution, so a 3X installing a mici-only prebuilt
+  # has no warp and loses dmonitoringmodeld and modeld at startup.
+  PREBUILT_ALL_CAMERAS: "1"
   BUILD_DIR: "/data/openpilot"
   OUTPUT_DIR: ${{ github.workspace }}/output
   CI_DIR: ${{ github.workspace }}/release/ci
@@ -25,14 +28,13 @@ on:
 
 jobs:
   guard:
-    # Cheap gate so a wrong branch never occupies the device or force-pushes the
-    # release branch with a build of itself.
+    # Reject unexpected refs before reserving the device or publishing main.
     runs-on: ubuntu-24.04
     steps:
-      - name: Refuse to cut a release from the release branch
+      - name: Refuse to cut a release from anything but develop
         run: |
-          if [ "${{ env.SOURCE_BRANCH }}" = "${{ env.TARGET_BRANCH }}" ]; then
-            echo "::error::${{ env.TARGET_BRANCH }} is the published release branch and is force-pushed by this workflow. Run it from develop."
+          if [ "${{ env.SOURCE_BRANCH }}" != "develop" ]; then
+            echo "::error::${{ env.TARGET_BRANCH }} is cut from develop only; this run is from '${{ env.SOURCE_BRANCH }}'. Run the workflow from develop."
             exit 1
           fi
           echo "cutting ${{ env.TARGET_BRANCH }} from ${{ env.SOURCE_BRANCH }}"
@@ -78,6 +80,9 @@ jobs:
           # BUILD_DIR is the CI copy bind-mounted over /data/openpilot inside the
           # runner service's private mount namespace, not the real install.
           mkdir -p "${BUILD_DIR}/"
+          # Verify the bind mount before clearing it. Outside the unit, this path is the
+          # live install.
+          mountpoint -q "$BUILD_DIR" || { echo "::error::$BUILD_DIR is not a mount point; refusing to wipe the real install. Run the runner from its systemd unit."; exit 1; }
           sudo find $BUILD_DIR/ -mindepth 1 -delete
           source ${UV_PROJECT_ENVIRONMENT}/bin/activate
           PYTHONPATH=$PYTHONPATH:${{ github.workspace }}/ ${{ github.workspace }}/scripts/manage-powersave.py --disable

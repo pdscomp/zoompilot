@@ -22,16 +22,13 @@ from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N
 from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.sunnypilot import PARAMS_UPDATE_PERIOD
 from openpilot.sunnypilot.selfdrive.selfdrived.events import EventsSP
+from openpilot.sunnypilot.selfdrive.controls.lib.smart_cruise_control.limits import A_PUB_MIN, get_planning_limits, publish_ramp
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit import ACTIVE_STATES, ENABLED_STATES, \
   PCM_LONG_REQUIRED_MAX_SET_SPEED, CONFIRM_SPEED_THRESHOLD, V_CRUISE_UNSET
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.common import Mode
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.helpers import confirm_needed_for_change, set_speed_limit_assist_availability
 
 EventNameSP = custom.OnroadEventSP.EventName
-
-# Publication shaping shared by the limiter sources (see docs/curve-and-limit-planning.md)
-_A_PUB_MIN = -2.0  # m/s2
-_PUB_JERK = 2.0  # m/s3
 SpeedLimitAssistState = custom.LongitudinalPlanSP.SpeedLimit.AssistState
 
 __all__ = ['ACTIVE_STATES', 'ENABLED_STATES', 'SpeedLimitAssist', 'SpeedLimitAssistState']
@@ -56,6 +53,7 @@ class SpeedLimitAssist:
     self.params = Params()
     self.CP = CP
     self.CP_SP = CP_SP
+    self.limits = get_planning_limits(CP)
     self.frame = -1
     self.long_engaged_timer = 0
     self.pre_active_timer = 0
@@ -129,16 +127,18 @@ class SpeedLimitAssist:
     return V_CRUISE_UNSET
 
   def get_a_target_from_control(self) -> float:
-    # The published aTarget seeds mpc.set_cur_state, which is not jerk-limited the way
-    # the cruise candidate is, so a state change must never step it; idle states track
-    # a_ego directly (wire parity, and the ramp's starting point on activation).
-    a_des = float(min(max(self.acceleration_solutions[self.state](), _A_PUB_MIN), -_A_PUB_MIN))
+    # active states publish through the shared ramp (the plan aTarget seeds the MPC, so a
+    # state change must never step it); idle states track a_ego, the ramp's starting point
+    a_des = float(min(max(self.acceleration_solutions[self.state](), A_PUB_MIN), -A_PUB_MIN))
     if self.state in ACTIVE_STATES:
-      step = _PUB_JERK * DT_MDL
-      self._a_out = min(max(a_des, self._a_out - step), self._a_out + step)
+      self._a_out = publish_ramp(a_des, self._a_out, self.limits, self.v_ego)
     else:
       self._a_out = a_des
     return self._a_out
+
+  def update_buttons(self, release_toggle: int) -> None:
+    # upstream's plannerd hook: press handling lives in the card-side cruise arbiter
+    pass
 
   def update_params(self) -> None:
     if self.frame % int(PARAMS_UPDATE_PERIOD / DT_MDL) == 0:
@@ -261,8 +261,7 @@ class SpeedLimitAssist:
     if self.state == SpeedLimitAssistState.preActive:
       events_sp.add(EventNameSP.speedLimitPreActive)
 
-    # pending fires no alert: it is a waiting state (engaged, no limit known yet), and
-    # announcing "auto adjusting" on every engage reads as SLA acting when it is not
+    # pending fires no alert: announcing "auto adjusting" on every engage reads as SLA acting
 
     if self.is_active:
       if self._state_prev not in ACTIVE_STATES:

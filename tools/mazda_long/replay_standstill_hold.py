@@ -76,7 +76,7 @@ def mock_inputs(cc, cs, brake_hold, lead=None):
                                leadOne=SimpleNamespace(dRel=lead[0] if lead else 0.0,
                                                        vRel=lead[1] if lead else 0.0))
   carstate = SimpleNamespace(out=out, resume_button=0, brake_hold=brake_hold,
-                             stock_radar_alive=False, fsc_settled=True, radar_session_refused=False)
+                             stock_radar_alive=False, stock_radar_gone=True, fsc_settled=True, radar_session_refused=False)
   return control, control_sp, carstate
 
 
@@ -116,5 +116,5 @@ def replay(path):
 
 
 if __name__ == "__main__":
-  ok = all([replay(p) for p in sys.argv[1:]])
+  ok = all(replay(p) for p in sys.argv[1:])
   sys.exit(0 if ok else 1)

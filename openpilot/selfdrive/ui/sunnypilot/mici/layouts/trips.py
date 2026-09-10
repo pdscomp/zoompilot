@@ -1,7 +1,7 @@
 """
-Copyright (c) 2021-, Haibin Wen, sunnypilot, and a number of other contributors.
+Copyright (c) 2026-, Zeph Leggett.
 
-This file is part of sunnypilot and is licensed under the MIT License.
+This file is part of zoompilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
 import requests
@@ -9,10 +9,10 @@ import threading
 import time
 
 
-from openpilot.common.api.backend import backend_config
 from openpilot.common.constants import CV
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
+from openpilot.common.api.backend import backend_config
 from openpilot.selfdrive.ui.lib.api_helpers import authenticated_api_get
 from openpilot.selfdrive.ui.mici.widgets.button import BigButton
 from openpilot.selfdrive.ui.ui_state import ui_state, device

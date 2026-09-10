@@ -193,9 +193,41 @@ EVENTS_SP: dict[int, dict[str, Alert | AlertCallbackType]] = {
     ET.NO_ENTRY: NoEntryAlert("Parking Brake Engaged"),
   },
 
+  # pause-on-brake engagement with the brake already down: MADS enters paused and resumes on
+  # release, the same moment the panda arms its pending request
+  EventNameSP.silentPedalPressed: {
+    ET.NO_ENTRY: Alert(
+      "",
+      "",
+      AlertStatus.normal, AlertSize.none,
+      Priority.LOWEST, VisualAlert.none, AudibleAlert.none, 0.),
+  },
+
   EventNameSP.controlsMismatchLateral: {
     ET.IMMEDIATE_DISABLE: ImmediateDisableAlert("Controls Mismatch: Lateral"),
     ET.NO_ENTRY: NoEntryAlert("Controls Mismatch: Lateral"),
+  },
+
+  # The panda is rejecting our steering while MADS thinks it is steering: the wheel is
+  # unsteered from the first rejected frame, not from the disable 2 s later (Mazda routes
+  # 00000116/117: 2 s of rejected 0x243 with the camera relay-blocked latched the EPS fault)
+  EventNameSP.controlsMismatchLateralWarning: {
+    ET.WARNING: Alert(
+      "Take Control",
+      "Steering Blocked by Panda Safety",
+      AlertStatus.userPrompt, AlertSize.mid,
+      Priority.LOW, VisualAlert.steerRequired, AudibleAlert.prompt, .5),
+  },
+
+  # The stock camera's TJA/CTS stayed armed through openpilot's presses on the camera bus. The
+  # panda drops its 0x243 and the EPS follows ours, so the camera never sees its command
+  # executed. One press of the TJA button turns the stock system off; openpilot keeps steering.
+  EventNameSP.mazdaStockCtsActive: {
+    ET.WARNING: Alert(
+      "Stock CTS Is Still On",
+      "Press the TJA button to switch it off",
+      AlertStatus.userPrompt, AlertSize.mid,
+      Priority.LOW, VisualAlert.none, AudibleAlert.prompt, 4.),
   },
 
   EventNameSP.experimentalModeSwitched: {

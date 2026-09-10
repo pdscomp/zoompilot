@@ -5,9 +5,12 @@ This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
 
+import math
+
 from openpilot.cereal import messaging, custom
 from opendbc.car import structs
 from openpilot.common.constants import CV
+from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX
 from openpilot.sunnypilot.selfdrive.controls.lib.dec.dec import DynamicExperimentalController
 from openpilot.sunnypilot.selfdrive.controls.lib.e2e_alerts_helper import E2EAlertsHelper
@@ -40,6 +43,7 @@ class LongitudinalPlannerSP:
 
     self.output_v_target = 0.
     self.output_a_target = 0.
+    self.seed_fault_logged = False
 
   def is_e2e(self, sm: messaging.SubMaster) -> bool:
     experimental_mode = sm['selfdriveState'].experimentalMode
@@ -68,7 +72,7 @@ class LongitudinalPlannerSP:
       self.sla.update(long_enabled, long_override, v_ego, a_ego, v_cruise_cluster, self.resolver.speed_limit,
                       self.resolver.speed_limit_final_last, has_speed_limit, self.resolver.distance, self.events_sp)
     else:
-      self.sla.update(sm['carStateSP'].cruiseSession, v_ego, self.resolver.distance, a_ego, self.events_sp)
+      self.sla.update(sm['carStateSP'].zoompilot.cruiseSession, v_ego, self.resolver.distance, a_ego, self.events_sp)
 
     targets = {
       LongitudinalPlanSource.cruise: (v_cruise, a_ego),
@@ -78,7 +82,23 @@ class LongitudinalPlannerSP:
     }
 
     self.source = min(targets, key=lambda k: targets[k][0])
-    self.output_v_target, self.output_a_target = targets[self.source]
+    v_target, a_target = targets[self.source]
+
+    # The pair returned here becomes the MPC seed (set_cur_state pins stage 0 to it), and a
+    # single NaN in the seed poisons HPIPM's memory past acados_reset: every solve after it
+    # fails, the plan stays at zero and the car never resumes. No source may reach the
+    # solver with a non-finite target; fall back to what the cruise path would have given.
+    if not (math.isfinite(v_target) and math.isfinite(a_target)):
+      if not self.seed_fault_logged:
+        self.seed_fault_logged = True
+        cloudlog.error(f"longitudinal_planner: non-finite target from {self.source}: v={v_target} a={a_target}")
+      v_target = v_cruise if math.isfinite(v_cruise) else v_ego
+      a_target = a_ego if math.isfinite(a_ego) else 0.
+      if not math.isfinite(v_target):
+        v_target = 0.
+      self.source = LongitudinalPlanSource.cruise
+
+    self.output_v_target, self.output_a_target = v_target, a_target
     return self.output_v_target, self.output_a_target
 
   def update(self, sm: messaging.SubMaster) -> None:

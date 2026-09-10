@@ -14,22 +14,23 @@ from openpilot.cereal import log
 from openpilot.cereal.services import SERVICE_LIST
 from openpilot.common.utils import strip_deprecated_keys
 from openpilot.common.filter_simple import FirstOrderFilter
-from openpilot.common.ignition import get_ignition_state
-from openpilot.common.params import Params, ParamKeyFlag
+from openpilot.sunnypilot.common.ignition import get_ignition_state
+from openpilot.common.params import Params
 from openpilot.common.realtime import DT_HW
-from openpilot.selfdrive.modeld.helpers import MODELS_DIR, chestnut_compiled
 from openpilot.selfdrive.selfdrived.alertmanager import set_offroad_alert
 from openpilot.common.hardware import HARDWARE, COMMA_HARDWARE
 from openpilot.common.basedir import BASEDIR
-from openpilot.common.hardware.usb import CHESTNUT_FW_VERSION, CHESTNUT_ROM_USB_IDS, CHESTNUT_USB_IDS, get_usb_state, get_usb_topology, set_usb_state
+from openpilot.common.git import get_short_branch
+from openpilot.common.hardware.usb import CHESTNUT_FW_VERSION, CHESTNUT_USB_PRODUCT, get_usb_state, get_usb_topology, is_chestnut_usb_id, set_usb_state
 from openpilot.common.linux import LinuxSystemStats
 from openpilot.system.loggerd.config import get_available_percent
 from openpilot.common.swaglog import cloudlog
 from openpilot.sunnypilot.system.statsd import statlog
 from openpilot.system.hardware.power_monitoring import PowerMonitoring
+from openpilot.sunnypilot.system.hardware.hardwared_ext import HardwaredExt
 from openpilot.system.hardware.fan_controller import FanController
-from openpilot.common.version import terms_version, training_version, get_build_metadata, terms_version_sp, CHESTNUT_BRANCHES
-
+from openpilot.system.hardware.chestnut.status import ChestnutStatus
+from openpilot.common.version import terms_version, training_version, get_build_metadata, terms_version_sp
 
 ThermalStatus = log.DeviceState.ThermalStatus
 NetworkType = log.DeviceState.NetworkType
@@ -39,7 +40,6 @@ TEMP_TAU = 5.   # 5s time constant
 DISCONNECT_TIMEOUT = 5.  # wait 5 seconds before going offroad after disconnect so you get an alert
 PANDA_STATES_TIMEOUT = round(1000 / SERVICE_LIST['pandaStates'].frequency * 1.5)  # 1.5x the expected pandaState frequency
 ONROAD_CYCLE_TIME = 1  # seconds to wait offroad after requesting an onroad cycle
-OFFROAD_REQUEST_TIMEOUT = 10  # seconds for card's stock-ECU hand-back before force-offroad is granted anyway
 
 class Chestnut:
   # flash offroad, modeld ignores chestnut until the product string matches
@@ -51,6 +51,11 @@ class Chestnut:
     self.attempts = 0
     self.last_attempt = 0.
     self.flashed = False
+    self.mismatch = False
+
+  @property
+  def failed(self) -> bool:
+    return self.mismatch and self.attempts >= self.MAX_ATTEMPTS and self.thread is not None and not self.thread.is_alive() and not self.flashed
 
   def flash(self) -> None:
     ret = subprocess.run(["sudo", sys.executable, os.path.join(BASEDIR, "openpilot/system/hardware/chestnut/flash.py"), CHESTNUT_FW_VERSION],
@@ -59,9 +64,9 @@ class Chestnut:
     self.flashed = ret.returncode == 0
 
   def update(self, offroad: bool, usb_state: list[dict]) -> None:
-    mismatch = any((d["vendorId"], d["productId"]) in CHESTNUT_USB_IDS + CHESTNUT_ROM_USB_IDS and
-                   d["product"] != f"custom {CHESTNUT_FW_VERSION}-CLEAN" for d in usb_state)
-    if not mismatch:
+    self.mismatch = any(is_chestnut_usb_id(d["vendorId"], d["productId"], include_bootloader=True) and
+                        d["product"] != CHESTNUT_USB_PRODUCT for d in usb_state)
+    if not self.mismatch:
       self.flashed = False
       return
 
@@ -193,7 +198,7 @@ def hw_state_thread(end_event, hw_queue):
 def hardware_thread(end_event, hw_queue) -> None:
   system_stats = LinuxSystemStats()
   pm = messaging.PubMaster(['deviceState'])
-  sm = messaging.SubMaster(["peripheralState", "gpsLocationExternal", "selfdriveState", "pandaStates"], poll="pandaStates")
+  sm = messaging.SubMaster(["peripheralState", "gpsLocationExternal", "selfdriveState", "pandaStates", "chestnutState"], poll="pandaStates")
 
   count = 0
 
@@ -228,9 +233,9 @@ def hardware_thread(end_event, hw_queue) -> None:
   engaged_prev = False
   pwrsave = False
   offroad_cycle_count = 0
-  offroad_request_count = 0
 
   params = Params()
+  ext = HardwaredExt(params)
   power_monitor = PowerMonitoring()
 
   uptime_offroad: float = params.get("UptimeOffroad", return_default=True)
@@ -242,7 +247,8 @@ def hardware_thread(end_event, hw_queue) -> None:
 
   fan_controller = FanController(int(1./DT_HW))
   chestnut = Chestnut()
-  big_model_available = (MODELS_DIR / 'big_driving_supercombo.onnx').is_file() or chestnut_compiled()
+  chestnut_status = ChestnutStatus()
+  branch = get_short_branch()
 
   while not end_event.is_set():
     sm.update(PANDA_STATES_TIMEOUT)
@@ -251,30 +257,9 @@ def hardware_thread(end_event, hw_queue) -> None:
     peripheralState = sm['peripheralState']
 
     # handle requests to cycle system started state
-    if params.get_bool("OnroadCycleRequested"):
-      params.put_bool("OnroadCycleRequested", False, block=True)
-      # pandad races manager's onroad-transition param clearing when the cycle restarts.
-      # If it wins, it applies the previous session's CarParams safety immediately and
-      # opens the harness relay seconds before controls come up, cutting the camera off
-      # from the car long enough to fault it. Run the same clear early so the new
-      # session sequences like a normal boot: ELM327 (relay closed) until the fresh
-      # CarParams is ready.
-      params.clear_all(ParamKeyFlag.CLEAR_ON_ONROAD_TRANSITION)
+    if ext.update(started_ts is not None):
       offroad_cycle_count = sm.frame
     onroad_conditions["not_onroad_cycle"] = (sm.frame - offroad_cycle_count) >= ONROAD_CYCLE_TIME * SERVICE_LIST['pandaStates'].frequency
-
-    # Force-offroad requests defer to card so brands that silence a stock ECU can hand
-    # it back first (openpilot/sunnypilot/selfdrive/car/alpha_long_toggle.py). Grant
-    # directly when there is no onroad session to hand back from, or if card has not
-    # finished in time - the request must never silently fail.
-    if params.get_bool("OffroadModeRequested"):
-      offroad_request_count += 1
-      no_session = started_ts is None
-      if no_session or offroad_request_count >= OFFROAD_REQUEST_TIMEOUT * SERVICE_LIST['pandaStates'].frequency:
-        params.put_bool("OffroadMode", True)
-        params.put_bool("OffroadModeRequested", False)
-    else:
-      offroad_request_count = 0
 
     if sm.updated['pandaStates'] and len(pandaStates) > 0:
 
@@ -324,12 +309,11 @@ def hardware_thread(end_event, hw_queue) -> None:
 
     set_usb_state(msg.deviceState, last_hw_state.usb_state)
     chestnut.update(started_ts is None, last_hw_state.usb_state)
-    current_channel = get_build_metadata().channel
-    chestnut_target = CHESTNUT_BRANCHES.get(current_channel)
-    chestnut_needs_switch = msg.deviceState.chestnutPresent and not big_model_available and chestnut_target is not None
-    set_offroad_alert_if_changed("Offroad_ChestnutBranch", chestnut_needs_switch,
-                                 extra_text=chestnut_target if chestnut_needs_switch else None)
-
+    chestnut_state = sm["chestnutState"]
+    chestnut_valid = sm.alive["chestnutState"] and sm.valid["chestnutState"]
+    chestnut_status.update(started_ts is None, branch, last_hw_state.usb_state, chestnut.failed,
+                           params.get_bool("ChestnutLoading"), params.get("ChestnutActive"),
+                           chestnut_state if chestnut_valid else None, set_offroad_alert_if_changed)
     # this subset is only used for offroad
     temp_sources = [
       msg.deviceState.memoryTempC,

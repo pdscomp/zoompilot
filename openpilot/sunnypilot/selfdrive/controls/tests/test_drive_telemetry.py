@@ -4,15 +4,8 @@ from types import SimpleNamespace
 from openpilot.cereal import custom
 from openpilot.common.params import Params
 from openpilot.common.prefix import OpenpilotPrefix
-from openpilot.sunnypilot.selfdrive.controls.controlsd_ext import build_param_dump, lateral_extension_of, torque_v2_mode_of
-from openpilot.sunnypilot.selfdrive.controls.lib.torque_tune import MazdaTorqueV2Mode
+from openpilot.sunnypilot.selfdrive.controls.controlsd_ext import build_param_dump
 
-NONE = custom.CarControlSP.LateralExtension.none
-JERK = custom.CarControlSP.LateralExtension.jerkAware
-NNLC = custom.CarControlSP.LateralExtension.neuralNetwork
-MODE_NA = custom.CarControlSP.TorqueV2Mode.notApplicable
-MODE_A = custom.CarControlSP.TorqueV2Mode.modeA
-MODE_B = custom.CarControlSP.TorqueV2Mode.modeB
 
 
 def test_param_dump_records_settings_and_hides_secrets_and_blobs():
@@ -37,29 +30,4 @@ def test_param_dump_records_settings_and_hides_secrets_and_blobs():
     assert "NeuralNetworkLateralControl" in keys and "AccessToken" not in keys
 
 
-def _lac(ext=None):
-  return SimpleNamespace(extension=ext)
 
-
-def test_lateral_extension_identity():
-  assert lateral_extension_of(None) == NONE
-  assert lateral_extension_of(_lac()) == NONE
-
-  off = SimpleNamespace(overrides_output=False, _nnlc_enabled=True, _jerk_aware_enabled=False)
-  assert lateral_extension_of(_lac(off)) == NONE  # v2: overrides suppressed
-
-  nnlc = SimpleNamespace(overrides_output=True, _nnlc_enabled=True, _jerk_aware_enabled=False)
-  assert lateral_extension_of(_lac(nnlc)) == NNLC
-
-  jerk = SimpleNamespace(overrides_output=True, _nnlc_enabled=False, _jerk_aware_enabled=True)
-  assert lateral_extension_of(_lac(jerk)) == JERK
-
-  plain = SimpleNamespace(overrides_output=True, _nnlc_enabled=False, _jerk_aware_enabled=False)
-  assert lateral_extension_of(_lac(plain)) == NONE
-
-
-def test_torque_v2_mode_identity():
-  assert torque_v2_mode_of(None) == MODE_NA
-  assert torque_v2_mode_of(SimpleNamespace()) == MODE_NA
-  assert torque_v2_mode_of(SimpleNamespace(mazda_v2_mode=MazdaTorqueV2Mode.A)) == MODE_A
-  assert torque_v2_mode_of(SimpleNamespace(mazda_v2_mode=MazdaTorqueV2Mode.B)) == MODE_B

@@ -147,9 +147,9 @@ class Controls(ControlsExt):
       new_desired_curvature = self.sm['lateralManeuverPlan'].desiredCurvature if CC.latActive else self.curvature
     else:
       new_desired_curvature = model_v2.action.desiredCurvature if CC.latActive else self.curvature
-    new_desired_curvature, lat_jerk_factor = self.update_lateral_assist(self.sm, CC.latActive, new_desired_curvature,
-                                                                        self.desired_curvature, self.curvature)
+    lat_jerk_factor = self.lane_change_jerk_factor(self.sm, CC.latActive, new_desired_curvature, self.desired_curvature)
     self.desired_curvature, curvature_limited = clip_curvature(CS.vEgo, self.desired_curvature, new_desired_curvature, lp.roll, lat_jerk_factor)
+    # the fork's toggle-honoring delay: live lagd when on, fixed CP+software when off
     lat_delay = self.lat_delay + LAT_SMOOTH_SECONDS
 
     actuators.curvature = self.desired_curvature

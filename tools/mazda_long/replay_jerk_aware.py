@@ -36,27 +36,33 @@ import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from openpilot.common.prefix import OpenpilotPrefix
 
 
 def load_frames(seg_paths, keep_model=True):
   """Extract per-controlsState-frame inputs from rlogs (100 Hz), forward-filling slower
-  services. keep_model=False drops the modelV2 reference from each frame — a run with the
+  services. keep_model=False drops the modelV2 reference from each frame: a run with the
   extension override controllers off never reads it, and retaining the readers pins every
   segment's rlog buffer in memory for the whole run. keep_model='plan' copies just the
   fields the v2 setpoint jerk source reads into a small namespace per model message, so
   the trajectory replays without pinning the rlog buffers."""
   from openpilot.tools.lib.logreader import LogReader
+  from speed_bin_log import SpeedBinTracker
   frames = []
   cs_last = None
   lp_last = None
   model_last = None
   ltp_last = None
+  ltp_sp_last = None
+  bins = SpeedBinTracker()
   cp_reader = None
   for seg in seg_paths:
     for m in LogReader(str(seg / "rlog.zst")):
       w = m.which()
+      if bins.feed(w, m):
+        continue
       if w == 'carParams' and cp_reader is None:
         cp_reader = m.carParams
       elif w == 'carState':
@@ -75,6 +81,7 @@ def load_frames(seg_paths, keep_model=True):
           )
       elif w == 'lateralTorqueParameters':
         ltp_last = m.lateralTorqueParameters
+        ltp_sp_last = bins.bins_for(ltp_last)  # the fork message beside it, or the legacy fields
       elif w == 'controlsState':
         st = m.controlsState.lateralControlState
         if st.which() != 'torqueState' or cs_last is None or lp_last is None or model_last is None:
@@ -85,7 +92,7 @@ def load_frames(seg_paths, keep_model=True):
           steering_angle=cs_last.steeringAngleDeg, steering_rate=cs_last.steeringRateDeg,
           steering_pressed=cs_last.steeringPressed,
           roll=lp_last.roll, angle_offset=lp_last.angleOffsetDeg,
-          model=model_last if keep_model else None, ltp=ltp_last,
+          model=model_last if keep_model else None, ltp=ltp_last, ltp_sp=ltp_sp_last,
           active=ts.active, logged_output=ts.output, logged_i=ts.i,
           desired_curvature=m.controlsState.desiredCurvature,
         ))
@@ -166,7 +173,7 @@ def run_variant(frames, fingerprint, mode: str):
       controller.extension.update_limits()
       # controlsd_ext: per-bin values on each new lateralTorqueParameters message
       if f.ltp is not last_ltp:
-        controller.extension.update_speed_dep_torque(f.ltp)
+        controller.extension.update_speed_dep_torque(f.ltp, f.ltp_sp)
         last_ltp = f.ltp
     controller.extension.update_model_v2(f.model)
     controller.extension.update_lateral_lag(lat_delay)

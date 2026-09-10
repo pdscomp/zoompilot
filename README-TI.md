@@ -145,8 +145,8 @@ All under `opendbc/car/mazda/` + `opendbc/safety/`.
 
 ### values.py
 
-- `MazdaFlags.TORQUE_INTERCEPTOR = 4` (car flag, set at params time)
-- `MazdaSafetyFlags.TORQUE_INTERCEPTOR = 2` (panda safetyParam bit)
+- `MazdaFlags.TORQUE_INTERCEPTOR = 16` (car flag, set at params time; moved from 4 after upstream took 4 for LEGACY_FW_EPS)
+- `MazdaSafetyFlags.TORQUE_INTERCEPTOR = 8` (panda safetyParam bit; moved from 2 after upstream took 2 for STEER_TO_ZERO_EPS)
 - `TorqueInterceptorState(IntEnum)`: DISCOVER=0, OFF=1, DRIVER_OVER=2, RUN=3
 - `TorqueInterceptorControllerParams`: the limits table from §3
 

@@ -11,7 +11,10 @@ Find the local rlogs with the best speed-bin torque learning, and propose seed u
 torqued_ext learns latAccelFactor/friction independently per speed bin. Two things to know
 when mining logs for seed values:
 
-  - `speedBinPoints` is only attached to the cache-write message (every 60 s), so point counts
+  - the bins ride on torqued_ext's own liveTorqueParametersSP message (customReserved19),
+    published beside every lateralTorqueParameters; pre-2026-09 logs carried them on the
+    upstream message and are read through speed_bin_log's legacy layout.
+  - `speedBinPoints` is only attached to the cache write (every 60 s), so point counts
     have to be read off the last message that carries them, not the last message.
   - learning persists across drives through the LiveTorqueParameters param cache, so point
     counts accumulate and later segments of a route contain earlier segments' data. Snapshots
@@ -39,8 +42,10 @@ import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from openpilot.tools.lib.logreader import LogReader
+from speed_bin_log import SpeedBinTracker
 
 TOML_PATH = REPO_ROOT / "opendbc_repo/opendbc/car/torque_data/speed_dependent.toml"
 FACTOR_SANITY = 0.3
@@ -67,27 +72,31 @@ def scan_one(path):
   last_vals = None
   last_points = None
   n_msgs = 0
+  bins = SpeedBinTracker()
   try:
     for ev in LogReader(str(path)):
       w = ev.which()
+      if bins.feed(w, ev):
+        continue
       if w == "carParams" and fingerprint is None:
         fingerprint = ev.carParams.carFingerprint
       elif w == "lateralTorqueParameters":
         tp = ev.lateralTorqueParameters
-        centers = list(tp.speedBinCenters)
+        sp = bins.bins_for(tp)
+        centers = list(sp.speedBinCenters) if sp is not None else []
         if not centers:
           continue
         n_msgs += 1
         last_vals = {
           "centers": centers,
-          "laf": list(tp.speedBinLatAccelFactors),
-          "friction": list(tp.speedBinFrictions),
-          "valid": list(tp.speedBinValid),
+          "laf": list(sp.speedBinLatAccelFactors),
+          "friction": list(sp.speedBinFrictions),
+          "valid": list(sp.speedBinValid),
           "global_laf": float(tp.latAccelFactorFiltered),
           "global_friction": float(tp.frictionCoefficientFiltered),
           "live_valid": bool(tp.valid),
         }
-        pts = list(tp.speedBinPoints)
+        pts = list(sp.speedBinPoints)
         if pts and any(len(p) for p in pts):
           last_points = [len(p) for p in pts]
   except Exception as e:
@@ -118,9 +127,12 @@ def depth_one(path, centers):
   co_t, co_tq, cc_t, cc_act, cs_t, cs_v, cs_ovr = [], [], [], [], [], [], []
   pose_t, pose_roll, llk_t, llk_yaw = [], [], [], []
   lag = 0.34
+  bins = SpeedBinTracker()
   try:
     for ev in LogReader(str(path)):
       w = ev.which()
+      if bins.feed(w, ev):
+        continue
       t = ev.logMonoTime * 1e-9
       if w == "carOutput":
         co_t.append(t)
@@ -141,10 +153,10 @@ def depth_one(path, centers):
       elif w == "lateralDelay":
         lag = ev.lateralDelay.lateralDelay
       elif w == "lateralTorqueParameters":
-        tp = ev.lateralTorqueParameters
-        if list(tp.speedBinCenters):
+        sp = bins.bins_for(ev.lateralTorqueParameters)
+        if sp is not None and list(sp.speedBinCenters):
           msgs += 1
-          for i, v in enumerate(list(tp.speedBinValid)[:n]):
+          for i, v in enumerate(list(sp.speedBinValid)[:n]):
             valid_msgs[i] += int(bool(v))
       elif w == "sendcan":
         for m in ev.sendcan:
@@ -257,9 +269,9 @@ def main():
     s["route"] = route_of(s["path"])
 
 
-  # ── measure learning depth (rlogs don't carry speedBinPoints) ──────────────
-  # torqued only attaches speedBinPoints to the param-cache write, not to the published
-  # message (`with_points=DEBUG` in torqued.py), so logged point counts are always zero.
+  # measure learning depth (rlogs don't carry speedBinPoints)
+  # torqued_ext only attaches speedBinPoints to the param-cache write, never to the published
+  # message, so logged point counts are always zero.
   # Instead: count the samples each segment contributes under torqued's own admission
   # filters, and count how long each bin held valid.
   print(f"\nmeasuring learning depth on {len(snaps)} usable segments (rlogs carry no point counts, so counting admissible samples directly)")
@@ -274,7 +286,7 @@ def main():
     s["ltp_msgs"] = d.get("msgs", 0)
     s["max_can"] = d.get("max_can", 0)
 
-  # ── aggregate per route ────────────────────────────────────────────────────
+  # aggregate per route
   def seg_index(path):
     stem = Path(path).parent.name
     try:
@@ -321,7 +333,7 @@ def main():
         + ("   (consistent - no rescaling needed)" if len(eras) <= 1
            else "   MIXED - low-speed laf must be rescaled by SM_current/SM_logged"))
 
-  # ── per-bin best source ────────────────────────────────────────────────────
+  # per-bin best source
   print(f"\n{'=' * 112}")
   print("PER-BIN BEST: route with the most admissible samples for that bin, value from its last segment")
   print("=" * 112)
@@ -355,7 +367,7 @@ def main():
   print("  'pin' = the learned value is sitting on the +/-30% (laf) / +/-50% (friction) sanity")
   print("  bound around the current seed, so the true value is probably outside it.")
 
-  # ── cross-route agreement ──────────────────────────────────────────────────
+  # cross-route agreement
   print(f"\n{'=' * 112}")
   print("CROSS-ROUTE AGREEMENT (one value per route, from its last segment)")
   print("=" * 112)
@@ -372,7 +384,7 @@ def main():
           f"{v.max():>8.3f} {100 * (v.max() - v.min()) / float(np.median(v)):>6.0f}% "
           f"{float(np.median(fr)):>9.3f}")
 
-  # ── proposed TOML ──────────────────────────────────────────────────────────
+  # proposed TOML
   print(f"\n{'=' * 112}")
   print("PROPOSED SEEDS")
   print("=" * 112)

@@ -157,10 +157,6 @@ def get_center_chatter_jerk_deadzone(v_ego, setpoint):
 
 class LatControlTorque(LatControlTorqueV0):
   # v0's __init__ calls update_limits() before this subclass's __init__ has run (and once
-  # before the extension exists), so everything the override reads needs a class-level
-  # default rather than a per-call guard.
-  _rail_limit_scale = 1.0
-  extension = None
   # Built into the PID by v0's constructor; the -measurement_rate error_rate v0 already
   # feeds it stops being a dead argument here.
   KD_SCHEDULE = [KD_INTERP_SPEEDS, KD_INTERP]
@@ -185,8 +181,9 @@ class LatControlTorque(LatControlTorqueV0):
     self.prev_setpoint = 0.0
     self._release_error_ramp = 1.0
     # Fraction of the steer scale the EPS actually delivers, by speed (None: full scale).
-    # Feeds both the saturation alert below and the PID's own limits (see update_limits);
-    # _rail_limit_scale holds the current fraction, refreshed per frame in update().
+    # The extension applies it to the host's steer_max per frame (its
+    # update_override_torque_params reports the change and the host re-limits the PID);
+    # kept here for the saturation alert's at-rail gating below.
     self.steer_rail_schedule = get_steer_rail_schedule(CP)
     # Planned-curvature cache for the setpoint jerk source (see the block comment above the
     # constants). Rebuilt only when a new modelV2 frame arrives (~20 Hz), not at 100 Hz.
@@ -203,26 +200,6 @@ class LatControlTorque(LatControlTorqueV0):
     cloudlog.info("LatControlTorque v2: extension output overrides (jerk-aware/NNLC) disabled")
     self.extension.disable_output_overrides()
     self.update_limits()  # an override controller may have retuned the shared PID to torque-space limits
-
-  def update_limits(self):
-    """Limit the PID to the torque the EPS will actually deliver at this speed, not to the full
-    steer scale. The carcontroller already clamps the command to the measured ceiling, so this
-    costs no delivered count; what it buys is that the PID's OWN anti-windup engages at the real
-    rail. That one is directional -- it blocks the integrator growing into the limit while still
-    letting it decay back out -- whereas the only thing reaching a railed command today is
-    controlsd's steer_limited_by_safety, which freezes in both directions at once. Measured: it
-    holds 62-71% of low-speed frames, pinning the integrator through whole corners against a
-    standing 0.4 m/s^2 error it is never allowed to absorb or unwind.
-
-    Platforms with no rail schedule keep the full scale, so this is a no-op for them.
-    """
-    scale = self._rail_limit_scale * self.steer_max
-    self.pid.set_limits(self.lateral_accel_from_torque(scale, self.torque_params),
-                        self.lateral_accel_from_torque(-scale, self.torque_params))
-    # torque-space extension controllers need +-steer_max instead; re-assert on every reset
-    # path (None until v0's __init__ constructs it, see the class-level default)
-    if self.extension is not None:
-      self.extension.update_limits()
 
   def _integrator_deepened_while_limited(self, steer_limited_by_safety, error):
     """steer_limited_by_safety means the applied torque differs from the request by more than
@@ -258,16 +235,10 @@ class LatControlTorque(LatControlTorqueV0):
       self._plan_curvature = None
 
   def update(self, active, CS, VM, params, steer_limited_by_safety, desired_curvature, calibrated_pose, curvature_limited, lat_delay):
-    # The deliverable rail moves with speed, so the PID limits have to be refreshed here:
-    # update_limits is otherwise only reached when the torque params themselves change.
-    rail_scale = 1.0
-    if self.steer_rail_schedule is not None:
-      rail_scale = float(np.interp(CS.vEgo, self.steer_rail_schedule[0], self.steer_rail_schedule[1]))
-    rail_changed = rail_scale != self._rail_limit_scale
-    self._rail_limit_scale = rail_scale
-
-    # Override torque params from extension
-    if self.extension.update_override_torque_params(self.torque_params) or rail_changed:
+    # Override torque params from extension; it also moves the host's steer_max along the
+    # EPS rail and reports it, so the PID limits land on the rail through the host's
+    # update_limits without a second copy of the schedule here.
+    if self.extension.update_override_torque_params(self.torque_params):
       self.update_limits()
 
     pid_log = log.ControlsState.LateralTorqueState.new_message()
@@ -443,7 +414,7 @@ class LatControlTorque(LatControlTorqueV0):
       # push the command onto it. Platforms without a rail schedule keep stock semantics
       # (rail_scale is 1.0 there). The PID limits sit on this same rail (see update_limits),
       # so at_rail is exactly "the PID is at its own limit".
-      at_rail = rail_scale * self.steer_max - abs(output_torque) < 1e-3
+      at_rail = self.steer_max - abs(output_torque) < 1e-3
       alert_limited = steer_limited_by_safety and (self.steer_rail_schedule is None or not at_rail)
       pid_log.saturated = bool(self._check_saturation(at_rail, CS, alert_limited, curvature_limited))
 

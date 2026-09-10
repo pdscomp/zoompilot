@@ -27,7 +27,7 @@ from openpilot.cereal import custom
 from replay_common import arbiter_frames, make_arbiter
 
 SessionState = custom.LongitudinalPlanSP.SpeedLimit.AssistState
-CruiseIntent = custom.CarStateSP.CruiseSession.CruiseIntent
+CruiseIntent = custom.CarStateZP.CruiseSession.CruiseIntent
 DEFAULT_LOG = Path.home() / "Desktop" / "952c07dea500f4e2_0000004f--fea08aad07--16--rlog.zst"
 
 

@@ -37,6 +37,7 @@ Run from repo root (venv active):
 """
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -62,6 +63,10 @@ def replay(path):
   arb = make_arbiter()
   CP = car.CarParams(pcmCruise=True, brand="mazda")
   servo = IntelligentCruiseButtonManagement(CP, custom.CarParamsSP(pcmCruiseSpeed=False))
+  # the overshoot toggle is a param the servo re-reads; force it on without touching this
+  # machine's params
+  servo.params = SimpleNamespace(get_bool=lambda key: key == "SmartCruiseDecelOvershoot")
+  servo.decel_overshoot_enabled = True
 
   enabled = False
   resolver = None
@@ -133,10 +138,10 @@ def replay(path):
       lp_servo.vTarget = float(targets[source])
       lp_servo.aTarget = float(a_target)
 
-      # -- selfdrived: the servo, seeing the session one message hop late
+      # -- selfdrived: the servo, seeing the session one message hop late through the plan
+      lp_servo.speedLimit.assist.state = session_state_stale
       CC = car.CarControl(enabled=enabled)
-      servo.run(CS, CC, lp_servo, is_metric=False, decel_overshoot_enabled=True,
-                session_state=session_state_stale)
+      servo.run(CS, CC, lp_servo, is_metric=False)
       session_state_stale = arb.state
       max_overshoot = max(max_overshoot, servo.overshoot_mph)
 

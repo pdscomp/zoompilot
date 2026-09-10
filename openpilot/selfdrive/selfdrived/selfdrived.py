@@ -117,7 +117,6 @@ class SelfdriveD(CruiseHelper):
     self.is_metric = self.params.get_bool("IsMetric")
     self.is_ldw_enabled = self.params.get_bool("IsLdwEnabled")
     self.disengage_on_accelerator = self.params.get_bool("DisengageOnAccelerator")
-    self.smart_cruise_decel_overshoot = self.params.get_bool("SmartCruiseDecelOvershoot")
 
     car_recognized = self.CP.brand != 'mock'
 
@@ -454,11 +453,14 @@ class SelfdriveD(CruiseHelper):
       self.logged_comm_issue = None
 
     if not self.CP.notCar and not big_model_settling:  # localization has nothing to work with during the load
-      if not self.sm['deviceMotion'].posenetOK:
+      # a message never received is capnp defaults, not a localizer verdict: locationd and paramsd
+      # publish nothing while modeld is down, and processNotRunning already says so
+      if self.sm.seen['deviceMotion'] and not self.sm['deviceMotion'].posenetOK:
         self.events.add(EventName.posenetInvalid)
-      if not self.sm['deviceMotion'].inputsOK:
+      if self.sm.seen['deviceMotion'] and not self.sm['deviceMotion'].inputsOK:
         self.events.add(EventName.locationdTemporaryError)
-      if (not self.sm['vehicleParameters'].valid and cal_status == log.ExtrinsicsCalibration.Status.calibrated and
+      if (self.sm.seen['vehicleParameters'] and not self.sm['vehicleParameters'].valid and
+          cal_status == log.ExtrinsicsCalibration.Status.calibrated and
           not TESTING_CLOSET and (not SIMULATION or REPLAY)):
         self.events.add(EventName.paramsdTemporaryError)
 
@@ -524,8 +526,7 @@ class SelfdriveD(CruiseHelper):
           self.events.add(EventName.personalityChanged)
         self.experimental_mode_switched = False
 
-    self.icbm.run(CS, self.sm['carControl'], self.sm['longitudinalPlanSP'], self.is_metric,
-                  self.smart_cruise_decel_overshoot, self.sm['carStateSP'].cruiseSession.state)
+    self.icbm.run(CS, self.sm['carControl'], self.sm['longitudinalPlanSP'], self.is_metric)
 
   def data_sample(self):
     _car_state = messaging.recv_one(self.car_state_sock)
@@ -667,7 +668,6 @@ class SelfdriveD(CruiseHelper):
       self.is_metric = self.params.get_bool("IsMetric")
       self.is_ldw_enabled = self.params.get_bool("IsLdwEnabled")
       self.disengage_on_accelerator = self.params.get_bool("DisengageOnAccelerator")
-      self.smart_cruise_decel_overshoot = self.params.get_bool("SmartCruiseDecelOvershoot")
       self.experimental_mode = self.params.get_bool("ExperimentalMode") and self.CP.openpilotLongitudinalControl
       self.personality = self.params.get("LongitudinalPersonality", return_default=True)
 

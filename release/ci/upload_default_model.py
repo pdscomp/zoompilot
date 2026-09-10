@@ -32,13 +32,15 @@ def main():
   parser.add_argument("--onnx-ref", required=True)
   parser.add_argument("--model-name", required=True)
   parser.add_argument("--tinygrad-ref", required=True)
+  parser.add_argument("--compile-ref", required=True)
   parser.add_argument("--run-number", required=True)
   args = parser.parse_args()
 
   api = HfApi()
   onnx_sha256 = hash_file(args.onnx_path)
   short_ref = args.onnx_ref[:8]
-  folder_name = f"model-{args.model_name}-{short_ref}-{args.run_number}"
+  safe_name = args.model_name.replace(" ", "-")
+  folder_name = f"model-{safe_name}-{short_ref}-{args.run_number}"
 
   print(f"ONNX hash: {onnx_sha256}")
   print(f"ONNX ref: {args.onnx_ref} (short: {short_ref})")
@@ -73,9 +75,10 @@ def main():
     with open(local_path) as f:
       defaults_json = json.load(f)
   except Exception:
-    defaults_json = {"tinygrad_ref": args.tinygrad_ref, "bundles": []}
+    defaults_json = {"bundles": []}
 
   defaults_json['tinygrad_ref'] = args.tinygrad_ref
+  defaults_json['compile_ref'] = args.compile_ref
 
   existing_idx = next((i for i, b in enumerate(defaults_json['bundles'])
                        if b.get('onnx_sha256') == onnx_sha256), None)

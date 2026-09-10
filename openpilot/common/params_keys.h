@@ -87,6 +87,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"LivestreamEncoderBitrate", {CLEAR_ON_MANAGER_START | DONT_LOG, INT}},
     {"LivestreamRequestKeyframe", {CLEAR_ON_MANAGER_START | DONT_LOG, BOOL}},
     {"LiveTorqueParameters", {PERSISTENT | DONT_LOG, BYTES}},
+    {"LiveTorqueParametersSP", {PERSISTENT | DONT_LOG, BYTES}},
     {"LocationFilterInitialState", {PERSISTENT, BYTES}},
     {"LateralManeuverMode", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION, BOOL}},
     {"LongitudinalManeuverMode", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION, BOOL}},
@@ -96,6 +97,12 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"ObdMultiplexingEnabled", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, BOOL}},
     {"Offroad_CarUnrecognized", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, JSON}},
     {"Offroad_ChestnutBranch", {CLEAR_ON_MANAGER_START, JSON}},
+    {"Offroad_ChestnutNotDetected", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, JSON}},
+    {"Offroad_ChestnutOverheated", {CLEAR_ON_MANAGER_START, JSON}},
+    {"Offroad_ChestnutPcieUnavailable", {CLEAR_ON_MANAGER_START, JSON}},
+    {"Offroad_ChestnutUncompiled", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, JSON}},
+    {"Offroad_ChestnutUpdateFailed", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, JSON}},
+    {"Offroad_ChestnutUsbSlow", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, JSON}},
     {"Offroad_ConnectivityNeeded", {CLEAR_ON_MANAGER_START, JSON}},
     {"Offroad_ConnectivityNeededPrompt", {CLEAR_ON_MANAGER_START, JSON}},
     {"Offroad_ExcessiveActuation", {PERSISTENT, JSON}},
@@ -106,7 +113,11 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"Offroad_UnregisteredHardware", {CLEAR_ON_MANAGER_START, JSON}},
     {"Offroad_UpdateFailed", {CLEAR_ON_MANAGER_START, JSON}},
     {"Offroad_DriverMonitoringUncertain", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, JSON}},
+    {"AlphaLongCycleAttempted", {CLEAR_ON_MANAGER_START | CLEAR_ON_IGNITION_ON, BOOL}},
     {"OnroadCycleRequested", {CLEAR_ON_MANAGER_START, BOOL}},
+    {"OffroadModeRequested", {CLEAR_ON_MANAGER_START, BOOL}},
+    {"StockEcuHandBackRequested", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION, BOOL}},
+    {"StockEcuHandBackDone", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION, BOOL}},
     {"OpenpilotEnabledToggle", {PERSISTENT | BACKUP, BOOL, "1"}},
     {"PandaHeartbeatLost", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION, BOOL}},
     {"PrimeType", {PERSISTENT, INT}},
@@ -138,6 +149,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"UptimeOnroad", {PERSISTENT, FLOAT, "0.0"}},
     {"ChestnutActive", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION | CLEAR_ON_IGNITION_ON, BOOL}},
     {"ChestnutLoading", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION | CLEAR_ON_IGNITION_ON, BOOL}},
+    {"ChestnutModelError", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION | CLEAR_ON_IGNITION_ON, BOOL}},
     {"Version", {PERSISTENT, STRING}},
 
     // --- sunnypilot params --- //
@@ -175,7 +187,6 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"MaxTimeOffroad", {PERSISTENT | BACKUP, INT, "1800"}},
     {"ModelRunnerTypeCache", {CLEAR_ON_ONROAD_TRANSITION, INT}},
     {"OffroadMode", {CLEAR_ON_MANAGER_START, BOOL}},
-    {"OffroadModeRequested", {CLEAR_ON_MANAGER_START, BOOL}},
     {"Offroad_TiciSupport", {CLEAR_ON_MANAGER_START, JSON}},
     {"OnroadScreenOffBrightness", {PERSISTENT | BACKUP, INT, "0"}},
     {"OnroadScreenOffBrightnessMigrated", {PERSISTENT | BACKUP, STRING, "0.0"}},
@@ -212,6 +223,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"ModelManager_LastSyncTime_Chestnut", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION, INT, "0"}},
     {"ModelManager_ModelsCache", {PERSISTENT | BACKUP, JSON}},
     {"ModelManager_ModelsCache_Chestnut", {PERSISTENT | BACKUP, JSON}},
+    // zoompilot: one-time marker so the Firehose Model is applied as the default exactly once (see models/default_bootstrap.py)
+    {"DefaultModelApplied", {PERSISTENT | BACKUP, BOOL}},
 
     // Neural Network Lateral Control
     {"NeuralNetworkLateralControl", {PERSISTENT | BACKUP, BOOL, "0"}},
@@ -234,6 +247,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
 
     // sunnypilot car specific params
     {"HyundaiLongitudinalTuning", {PERSISTENT | BACKUP, INT, "0"}},
+    {"MazdaTjaButton", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"SubaruStopAndGo", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"SubaruStopAndGoManualParkingBrake", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"TeslaCoopSteering", {PERSISTENT | BACKUP, BOOL, "0"}},
@@ -249,12 +263,10 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"LagdToggle", {PERSISTENT | BACKUP, BOOL, "1"}},
     {"LagdToggleDelay", {PERSISTENT | BACKUP, FLOAT, "0.2"}},
     {"LagdValueCache", {PERSISTENT, FLOAT, "0.2"}},
-    {"LaneChangeSmoothing", {PERSISTENT | BACKUP, BOOL, "0"}},
-    {"LaneChangeSmoothingPace", {PERSISTENT | BACKUP, INT, "5"}},
+    {"LaneChangeSmoothing", {PERSISTENT | BACKUP, INT, "0"}},
     {"OneLaneChange", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"LaneTurnDesire", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"LaneTurnValue", {PERSISTENT | BACKUP, FLOAT, "19.0"}},
-    {"LowSpeedTurnAssist", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"PlanplusControl", {PERSISTENT | BACKUP, FLOAT, "1.0"}},
 
     // mapd

@@ -66,6 +66,7 @@ BLOCKED_PARAMS = {
   "AthenadUploadQueue",
   "SunnylinkUploadQueue",
   "OnroadCycleRequested",      # Prevent remote cycle trigger
+  "AlphaLongitudinalEnabled",  # Flips longitudinal mode via an onroad cycle; local UI only
   "ParamsVersion",         # Device-managed version counter
 }
 

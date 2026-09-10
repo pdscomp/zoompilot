@@ -50,18 +50,11 @@ class VCruiseHelper(VCruiseHelperSP):
 
     _enabled = self.update_enabled_state(CS, enabled)
 
-    # classify presses and step the SLA session before increments and reconciliation,
-    # in the same frame as the button events (see CruiseArbiter.step for the ordering).
-    # _enabled, not enabled: on non-pcmCruiseSpeed cars "enabled" is suppressed until
-    # the engaging button releases, and the arbiter's session (DISABLED guard, prompt
-    # entry) must run against the same notion the increments use — the raw flag would
-    # start the session mid-engage-hold.
-    self.update_cruise_arbiter(CS, _enabled)
-
     if CS.cruiseState.available:
       if not self.CP.pcmCruise or (not self.CP_SP.pcmCruiseSpeed and _enabled):
         # if stock cruise is completely disabled, then we can use our own set speed logic
         self._update_v_cruise_non_pcm(CS, _enabled, is_metric)
+        self.update_speed_limit_assist_v_cruise_non_pcm()
         self.v_cruise_cluster_kph = self.v_cruise_kph
       else:
         self.v_cruise_kph = CS.cruiseState.speed * CV.MS_TO_KPH
@@ -75,8 +68,6 @@ class VCruiseHelper(VCruiseHelperSP):
     else:
       self.v_cruise_kph = V_CRUISE_UNSET
       self.v_cruise_cluster_kph = V_CRUISE_UNSET
-
-    self.reconcile_setpoint_with_dash(CS)
 
     if not self.CP.pcmCruise or not self.CP_SP.pcmCruiseSpeed:
       self.update_button_timers(CS, enabled)
@@ -117,10 +108,10 @@ class VCruiseHelper(VCruiseHelperSP):
     if not self.button_change_states[button_type]["enabled"]:
       return
 
-    # A press the cruise arbiter classified as confirm or dismiss carries session
-    # semantics, never a v_cruise increment; the ECU's own step comes back via dash
-    # reconciliation, so incrementing here would count the press twice.
-    if self.press_owned(button_type):
+    # Speed Limit Assist for Non PCM long cars.
+    # True: Disallow set speed changes when user confirmed the target set speed during preActive state
+    # False: Allow set speed changes as SLA is not requesting user confirmation
+    if self.update_speed_limit_assist_pre_active_confirmed(button_type):
       return
 
     long_press, v_cruise_delta = VCruiseHelperSP.update_v_cruise_delta(self, long_press, v_cruise_delta)
@@ -129,7 +120,7 @@ class VCruiseHelper(VCruiseHelperSP):
     else:
       self.v_cruise_kph += v_cruise_delta * CRUISE_INTERVAL_SIGN[button_type]
 
-    # If set is pressed while overriding, clip cruise speed to minimum of vEgo.
+    # If set is pressed while overriding, clip cruise speed to minimum of vEgo
     # Only valid when openpilot owns the set speed: on ICBM cars (pcmCruise with
     # pcmCruiseSpeed False) the stock ECU simply decrements on SET-, so clipping to vEgo
     # here inflates v_cruise above the real dash and ICBM would then chase the overridden speed.

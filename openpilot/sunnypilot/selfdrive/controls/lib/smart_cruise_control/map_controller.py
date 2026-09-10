@@ -9,8 +9,8 @@ from openpilot.selfdrive.car.cruise import V_CRUISE_UNSET
 from openpilot.sunnypilot import PARAMS_UPDATE_PERIOD
 from openpilot.sunnypilot.navd.helpers import coordinate_from_param, Coordinate
 from openpilot.sunnypilot.selfdrive.controls.lib.smart_cruise_control import MIN_V
-from openpilot.sunnypilot.selfdrive.controls.lib.smart_cruise_control.limits import COMMIT_FRAC, get_planning_limits
-from openpilot.sunnypilot.selfdrive.controls.lib.smart_cruise_control.speed_profile import lead_distance
+from openpilot.sunnypilot.selfdrive.controls.lib.smart_cruise_control.limits import COMMIT_FRAC, get_planning_limits, publish_ramp
+from openpilot.sunnypilot.selfdrive.controls.lib.smart_cruise_control.speed_profile import lead_distance, required_decel
 
 MapState = VisionState = custom.LongitudinalPlanSP.SmartCruiseControl.MapState
 
@@ -19,9 +19,6 @@ ENABLED_STATES = (MapState.enabled, MapState.overriding, *ACTIVE_STATES)
 
 R = 6373000.0  # approximate radius of earth in meters
 
-# Publication shaping shared by the limiter sources (see docs/curve-and-limit-planning.md)
-_A_PUB_MIN = -2.0  # m/s2
-_PUB_JERK = 2.0  # m/s3
 _T_FALLBACK = 2.8  # s; decel horizon when the target's distance is degenerate
 TO_RADIANS = math.pi / 180
 TO_DEGREES = 180 / math.pi
@@ -84,14 +81,12 @@ class SmartCruiseControlMap:
     return V_CRUISE_UNSET
 
   def get_a_target_from_control(self) -> float:
-    # The decel actually required to arrive at the target: this keys ICBM's overshoot gap
-    # on stock ACC, so a_ego here meant map curves never braked the real car. Ramped: the
-    # plan aTarget seeds mpc.set_cur_state, which is not jerk-limited.
+    # the decel actually required to arrive at the target (it keys ICBM's overshoot gap on
+    # stock ACC), clipped to the path and ramped since the plan aTarget seeds the MPC
     if self.is_active and 0. < self.v_target < self.v_ego:
       d_eff = max(self.target_distance, self.v_ego * _T_FALLBACK)
-      a_des = max((self.v_target ** 2 - self.v_ego ** 2) / (2. * d_eff), _A_PUB_MIN)
-      step = _PUB_JERK * DT_MDL
-      self._a_out = min(max(a_des, self._a_out - step), self._a_out + step)
+      a_des = -required_decel(self.v_ego, [self.v_target], [d_eff])
+      self._a_out = publish_ramp(a_des, self._a_out, self.limits, self.v_ego)
     else:
       self._a_out = self.a_ego
     return self._a_out
@@ -130,7 +125,7 @@ class SmartCruiseControlMap:
     forward_distances = distances[min_idx:]
 
     # a target binds once the decel it requires (past the actuation lead) reaches the
-    # commit fraction of the platform budget; same rule as the vision solver
+    # commit fraction of the platform budget; same solver and gate as the vision path
     lim = self.limits
     jerk = lim.jerk(self.v_ego)
     valid_velocities = []
@@ -145,7 +140,7 @@ class SmartCruiseControlMap:
       d = forward_distances[i]
       t_lead = lim.t_lead + lim.dash_traversal_time(max(self.v_ego - tv, 0.))
       d_lead = lead_distance(self.v_ego, t_lead, lim.a_budget, jerk)
-      a_req = (self.v_ego ** 2 - tv ** 2) / (2. * max(d - d_lead, 0.5))
+      a_req = required_decel(self.v_ego, [tv], [d], d_lead)
       if a_req >= COMMIT_FRAC * lim.a_budget:
         valid_velocities.append((float(tv), tlat, tlon, d))
 
@@ -171,6 +166,9 @@ class SmartCruiseControlMap:
           continue
 
         if tlat == self.target_lat and tlon == self.target_lon and tv == self.v_target:
+          # still ahead, just under the commit gate: keep the target at its current
+          # distance, since the published decel divides by it every frame
+          self.target_distance = forward_distances[i]
           return
 
       # not found so let's reset

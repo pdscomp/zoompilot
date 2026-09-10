@@ -11,7 +11,7 @@ backward pass handles both and yields the required deceleration as a by-product:
 hold the set speed as long as possible, then decelerate at the budget the platform
 can actually deliver, arriving at each constraint at its allowed speed.
 
-Pure functions over arrays; no I/O, no state. See docs/curve-and-limit-planning.md.
+Pure functions over arrays; no I/O, no state. See docs/zoompilot/scc-curve-planning.md.
 """
 import math
 import numpy as np

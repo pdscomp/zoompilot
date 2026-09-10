@@ -29,12 +29,15 @@ class FakeParams:
   def get(self, key):
     return self._store.get(key)
 
+  def put(self, key, val, block=False):
+    self._store[key] = val
+
   def put_bool(self, key, val):
     self._store[key] = bool(val)
 
 
 def _cx5_eps_cp():
-  return CarParams(brand="mazda", flags=MazdaFlags.STEER_TO_ZERO.value)
+  return CarParams(brand="mazda", flags=MazdaFlags.STEER_TO_ZERO_EPS.value)
 
 
 def _pre_2022_mazda_cp():
@@ -42,7 +45,7 @@ def _pre_2022_mazda_cp():
 
 
 def _non_mazda_cp():
-  return CarParams(brand="toyota", flags=MazdaFlags.STEER_TO_ZERO.value)
+  return CarParams(brand="toyota", flags=MazdaFlags.STEER_TO_ZERO_EPS.value)
 
 
 def _ti_cp():
@@ -91,3 +94,14 @@ class TestMazdaTorqueDefaultsSeed:
     assert params.get_bool("EnforceTorqueControl") is False  # explicit pick wins
     assert params.get_bool("LiveTorqueParamsToggle") is True  # unset keys still seed
     assert params.get_bool("MazdaTorqueDefaultsApplied") is True
+
+
+def test_torque_seed_does_not_expand_to_legacy_or_ti_eps():
+  # Historical CarParamsPersistent blobs are ambiguous under the new layout: old TI bit 4
+  # reads as LEGACY_FW_EPS now. The seed must not widen its population or touch tuning there.
+  for flags in (MazdaFlags.LEGACY_FW_EPS,
+                MazdaFlags.STEER_TO_ZERO_EPS | MazdaFlags.TORQUE_INTERCEPTOR):
+    params = FakeParams({"TorqueControlTune": 1.0})
+    before = dict(params._store)
+    _seed_mazda_torque_defaults(CarParams(brand="mazda", flags=int(flags)), params)
+    assert params._store == before

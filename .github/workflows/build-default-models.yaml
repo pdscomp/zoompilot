@@ -30,10 +30,12 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       model_name: ${{ steps.resolve.outputs.model_name }}
+      safe_model_name: ${{ steps.resolve.outputs.safe_model_name }}
       onnx_ref: ${{ steps.resolve.outputs.onnx_ref }}
       onnx_path: ${{ steps.resolve.outputs.onnx_path }}
       hf_defaults_path: ${{ steps.resolve.outputs.hf_defaults_path }}
       tinygrad_ref: ${{ steps.resolve.outputs.tinygrad_ref }}
+      compile_ref: ${{ steps.resolve.outputs.compile_ref }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -64,11 +66,16 @@ jobs:
             exit 1
           fi
 
+          COMPILE_REF=$(python3 openpilot/sunnypilot/models/compile_ref.py)
+
+          SAFE_NAME="${NAME// /-}"
           echo "model_name=${NAME}" >> $GITHUB_OUTPUT
+          echo "safe_model_name=${SAFE_NAME}" >> $GITHUB_OUTPUT
           echo "onnx_ref=${ONNX_REF}" >> $GITHUB_OUTPUT
           echo "onnx_path=${ONNX_PATH}" >> $GITHUB_OUTPUT
           echo "hf_defaults_path=${HF_DEFAULTS_PATH}" >> $GITHUB_OUTPUT
           echo "tinygrad_ref=${TINYGRAD_REF}" >> $GITHUB_OUTPUT
+          echo "compile_ref=${COMPILE_REF}" >> $GITHUB_OUTPUT
 
   build_small_model:
     needs: resolve
@@ -135,7 +142,7 @@ jobs:
 
       - name: Prepare output
         env:
-          MODEL_NAME: ${{ needs.resolve.outputs.model_name }}
+          MODEL_NAME: ${{ needs.resolve.outputs.safe_model_name }}
         run: |
           source ${UV_PROJECT_ENVIRONMENT}/bin/activate
           export PYTHONPATH=${{ github.workspace }}
@@ -158,13 +165,13 @@ jobs:
       - name: Upload small model artifact
         uses: actions/upload-artifact@v4
         with:
-          name: model-${{ needs.resolve.outputs.model_name }}-${{ github.run_number }}
+          name: model-${{ needs.resolve.outputs.safe_model_name }}-${{ github.run_number }}
           path: ${{ github.workspace }}/small_output/
 
       - name: Upload artifact name file
         uses: actions/upload-artifact@v4
         with:
-          name: artifact-name-${{ needs.resolve.outputs.model_name }}
+          name: artifact-name-${{ needs.resolve.outputs.safe_model_name }}
           path: ${{ github.workspace }}/small_output/artifact_name.txt
 
       - name: Re-enable powersave
@@ -254,7 +261,7 @@ jobs:
 
       - name: Prepare output
         env:
-          MODEL_NAME: ${{ needs.resolve.outputs.model_name }}
+          MODEL_NAME: ${{ needs.resolve.outputs.safe_model_name }}
         run: |
           source ${UV_PROJECT_ENVIRONMENT}/bin/activate
           export PYTHONPATH=${{ github.workspace }}
@@ -277,13 +284,13 @@ jobs:
       - name: Upload big model artifact
         uses: actions/upload-artifact@v4
         with:
-          name: model-${{ needs.resolve.outputs.model_name }}-${{ github.run_number }}
+          name: model-${{ needs.resolve.outputs.safe_model_name }}-${{ github.run_number }}
           path: ${{ github.workspace }}/big_output/
 
       - name: Upload artifact name file
         uses: actions/upload-artifact@v4
         with:
-          name: artifact-name-${{ needs.resolve.outputs.model_name }}
+          name: artifact-name-${{ needs.resolve.outputs.safe_model_name }}
           path: ${{ github.workspace }}/big_output/artifact_name.txt
 
       - name: Re-enable powersave
@@ -318,7 +325,7 @@ jobs:
         if: ${{ inputs.target == 'small' || inputs.target == 'big' }}
         uses: actions/download-artifact@v4
         with:
-          name: artifact-name-${{ needs.resolve.outputs.model_name }}
+          name: artifact-name-${{ needs.resolve.outputs.safe_model_name }}
           path: artifact_name
 
       - name: Read artifact name
@@ -338,7 +345,7 @@ jobs:
       - name: Upload model to HF
         if: ${{ inputs.target == 'small' || inputs.target == 'big' }}
         env:
-          HF_OIDC_RESOURCE: datasets/${{ env.HF_REPO }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
           ARTIFACT_NAME: ${{ steps.artifact.outputs.artifact_name }}
         run: |
           rm -f output/artifact_name.txt
@@ -352,6 +359,7 @@ jobs:
             --onnx-ref "${{ needs.resolve.outputs.onnx_ref }}" \
             --model-name "${{ needs.resolve.outputs.model_name }}" \
             --tinygrad-ref "${{ needs.resolve.outputs.tinygrad_ref }}" \
+            --compile-ref "${{ needs.resolve.outputs.compile_ref }}" \
             --run-number "${{ github.run_number }}"
 
       - name: Download DM artifact
@@ -364,7 +372,7 @@ jobs:
       - name: Generate DM metadata and upload to HF
         if: ${{ inputs.target == 'dm' }}
         env:
-          HF_OIDC_RESOURCE: datasets/${{ env.HF_REPO }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           export PYTHONPATH=$(pwd)
           python3 -c "
@@ -423,6 +431,7 @@ jobs:
             --onnx-ref "${{ needs.resolve.outputs.onnx_ref }}" \
             --model-name "${{ needs.resolve.outputs.model_name }}" \
             --tinygrad-ref "${{ needs.resolve.outputs.tinygrad_ref }}" \
+            --compile-ref "${{ needs.resolve.outputs.compile_ref }}" \
             --run-number "${{ github.run_number }}"
 
   build_dm_model:
@@ -481,11 +490,29 @@ jobs:
           print(f'Chunked {pkl} into {len(targets)} chunks')
           "
 
+      - name: Compile DM warp
+        run: |
+          source ${UV_PROJECT_ENVIRONMENT}/bin/activate
+          export PYTHONPATH="${PYTHONPATH}:${{ github.workspace }}/tinygrad_repo:${{ github.workspace }}"
+
+          TG_FLAGS="DEV=QCOM IMAGE=1 FLOAT16=1 NOLOCALS=1 JIT_BATCH_SIZE=0 OPENPILOT_HACKS=1"
+          MODEL_DIR="${{ github.workspace }}/openpilot/selfdrive/modeld"
+          DM_SIZE=$(python3 -c "from openpilot.common.transformations.model import DM_INPUT_SIZE as s; print(f'{s[0]}x{s[1]}')")
+
+          for res in $(python3 -c "from openpilot.common.transformations.camera import _ar_ox_fisheye as a, _os_fisheye as o; print(f'{a.width}x{a.height} {o.width}x{o.height}')"); do
+            WARP_PKL="${MODEL_DIR}/models/dm_warp_${res}_tinygrad.pkl"
+            taskset -c 7 env ${TG_FLAGS} python3 ${MODEL_DIR}/compile_dm_warp.py \
+              --camera-resolution ${res} \
+              --warp-to ${DM_SIZE} \
+              --output ${WARP_PKL}
+          done
+
       - name: Prepare DM output
         run: |
           mkdir -p dm_output
           cp ${{ github.workspace }}/${{ env.DM_PKL }}.chunk* dm_output/
           cp ${{ github.workspace }}/${{ env.DM_PKL }}.chunkmanifest dm_output/
+          cp ${{ github.workspace }}/openpilot/selfdrive/modeld/models/dm_warp_* dm_output/
 
       - name: Upload DM artifact
         uses: actions/upload-artifact@v4

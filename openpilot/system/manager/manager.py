@@ -6,12 +6,11 @@ import sys
 import time
 import traceback
 
-from openpilot.cereal import log
 import openpilot.cereal.messaging as messaging
 import openpilot.system.sentry as sentry
 from openpilot.common.api.backend import enforce_backend_state, finalize_ti_enable
 from openpilot.common.utils import atomic_write
-from openpilot.common.ignition import get_ignition_state
+from openpilot.sunnypilot.common.ignition import get_ignition_state
 from openpilot.common.params import Params, ParamKeyFlag
 from openpilot.common.text_window import TextWindow
 from openpilot.common.hardware import HARDWARE, PC
@@ -23,6 +22,7 @@ from openpilot.common.swaglog import cloudlog, add_file_handler
 from openpilot.common.version import get_build_metadata
 from openpilot.common.hardware.hw import Paths
 
+from openpilot.sunnypilot.selfdrive.car.stock_ecu_handback import StockEcuHandBackGate
 from openpilot.sunnypilot.system.params_migration import run_migration
 
 
@@ -52,6 +52,11 @@ def manager_init() -> None:
   if params.get_bool("RecordFrontLock"):
     params.put_bool("RecordFront", True, block=True)
 
+  # Complete any staged TI transition, then enforce the backend lock,
+  # before registration or telemetry starts.
+  finalize_ti_enable(params)
+  enforce_backend_state(params)
+
   if not PC:
     run_migration(params)
 
@@ -60,11 +65,6 @@ def manager_init() -> None:
     default_value = params.get_default_value(k)
     if default_value is not None and params.get(k) is None:
       params.put(k, default_value, block=True)
-
-  # Complete any staged TI transition, then enforce the backend lock,
-  # before registration or telemetry starts.
-  finalize_ti_enable(params)
-  enforce_backend_state(params)
 
   # Create folders needed for msgq
   try:
@@ -145,6 +145,7 @@ def manager_thread() -> None:
 
   started_prev = False
   ignition_prev = False
+  stop_gate = StockEcuHandBackGate(params)
 
   while True:
     sm.update(1000)
@@ -195,7 +196,8 @@ def manager_thread() -> None:
         params.put("LastManagerExitReason", f"{param} {datetime.datetime.now()}", block=True)
         cloudlog.warning(f"Shutting down manager - {param} set")
 
-    if shutdown:
+    # a stop taken while onroad waits for the stock ECU hand-back, bounded
+    if shutdown and stop_gate.ready(started):
       break
 
 

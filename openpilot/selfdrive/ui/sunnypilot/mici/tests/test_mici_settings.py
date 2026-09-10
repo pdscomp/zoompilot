@@ -5,9 +5,7 @@ This file is part of zoompilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
 
-# Regression tests for the SP MICI settings widgets. These cover the param<->display contracts
-# that are easy to break silently: nothing renders differently when a scaling factor or a value
-# map is wrong, the setting just quietly writes the wrong number.
+# Regression coverage for MICI parameter-to-display contracts.
 
 import os
 
@@ -46,7 +44,7 @@ def params(gui):
 
 
 def render(widget):
-  """Drive one frame the way gui_app does — Widget.render() is what calls _update_state()."""
+  """Drive one frame through Widget.render, which calls _update_state."""
   import pyray as rl
   widget.render(rl.Rectangle(0, 0, 800, 600))
 
@@ -140,8 +138,7 @@ class TestMultiParamValueMapping:
     from openpilot.selfdrive.ui.sunnypilot.mici.widgets.button import BigMultiParamToggleSP
     from openpilot.sunnypilot.selfdrive.controls.lib.auto_lane_change import AutoLaneChangeMode
 
-    # AutoLaneChangeTimer defaults to "0" (nudge) in params_keys.h — an unset param must not
-    # read as "off" (-1), which is a different index AND a different stored value
+    # The declared default is nudge (0), while off is stored as -1.
     params.remove("AutoLaneChangeTimer")
     w = BigMultiParamToggleSP("t", "AutoLaneChangeTimer", list(ALC_LABELS.values()), values=list(ALC_LABELS))
     assert w.value == ALC_LABELS[AutoLaneChangeMode.NUDGE]
@@ -161,9 +158,10 @@ class TestMultiParamValueMapping:
     assert w.value == ALC_LABELS[AutoLaneChangeMode.OFF]
     assert params.get("AutoLaneChangeTimer") == AutoLaneChangeMode.OFF
 
-  def test_torque_tune_unset_is_v2(self, params):
-    """params_keys.h declares 2.0 (v2); controlsd_ext reads it with return_default, so the
-    selector must agree. If these drift, the UI claims a tune the car isn't running."""
+  def test_torque_tune_unset_shows_declared_default(self, params):
+    """controlsd_ext resolves an unset param through the params_keys.h default with
+    return_default, so the selector must agree. If these drift, the UI claims a tune the car
+    isn't running."""
     from openpilot.selfdrive.ui.sunnypilot.mici.layouts.steering import SteeringLayoutMici
     from openpilot.selfdrive.ui.sunnypilot.mici.widgets.button import BigMultiParamToggleSP
 
@@ -172,69 +170,12 @@ class TestMultiParamValueMapping:
 
     params.remove("TorqueControlTune")
     w = BigMultiParamToggleSP("t", "TorqueControlTune", list(versions), values=list(versions.values()))
-    assert versions[w.value] == pytest.approx(2.0)
+    assert versions[w.value] == pytest.approx(float(params.get("TorqueControlTune", return_default=True)))
 
     for label, version in versions.items():
       params.put("TorqueControlTune", version, block=True)
       w.refresh()
       assert w.value == label
-
-  def test_one_lane_change_control_is_wired_visible_and_summarized(self, params):
-    import pyray as rl
-
-    from openpilot.selfdrive.ui.sunnypilot.mici.layouts.steering import SteeringLayoutMici
-    from openpilot.sunnypilot.selfdrive.controls.lib.auto_lane_change import AutoLaneChangeMode
-    from openpilot.system.ui.lib.multilang import tr
-    from openpilot.system.ui.lib.text_measure import measure_text_cached
-
-    params.put_bool("OneLaneChange", True, block=True)
-    params.put("AutoLaneChangeTimer", AutoLaneChangeMode.NUDGE, block=True)
-    layout = SteeringLayoutMici()
-    control = layout._lc_one_per_signal
-    assert control.param == "OneLaneChange"
-
-    control.render(rl.Rectangle(0, 0, 402, 180))
-    lines = control._label._cached_wrapped_lines
-    assert " ".join(lines).lower() == "one per signal"
-    assert control._label._cached_total_height <= control._label._rect.height
-    assert all(measure_text_cached(control._label._font, line, control._label.font_size).x <= control._label._rect.width
-               for line in lines)
-
-    layout._update_state()
-    assert tr("one-per-signal") in layout._lane_change_btn._badge_labels
-
-  def test_cx5_v2_ab_maps_labels_to_param_values(self, params):
-    from openpilot.selfdrive.ui.sunnypilot.mici.layouts.steering import SteeringLayoutMici
-
-    selector = SteeringLayoutMici()._tq_mazda_v2_mode
-    assert selector._param == "MazdaTorqueV2Mode"
-    assert selector._options == ["A", "B"]
-    assert selector._values == [0, 1]
-
-    for stored, label in ((0, "A"), (1, "B")):
-      params.put("MazdaTorqueV2Mode", stored, block=True)
-      selector.refresh()
-      assert selector.value == label
-
-  def test_cx5_v2_ab_warning_fits_title(self, params):
-    from openpilot.selfdrive.ui.sunnypilot.mici.layouts.steering import SteeringLayoutMici
-    from openpilot.system.ui.lib.text_measure import measure_text_cached
-
-    import pyray as rl
-
-    selector = SteeringLayoutMici()._tq_mazda_v2_mode
-    selector.render(rl.Rectangle(0, 0, 402, 180))
-    label = selector._label
-    lines = label._cached_wrapped_lines
-    text = " ".join(lines).lower()
-
-    assert len(lines) == 3
-    assert label._cached_total_height <= label._rect.height
-    assert all(measure_text_cached(label._font, line, label.font_size).x <= label._rect.width for line in lines)
-    assert "..." not in text
-    assert "b" in text and "5–10 m/s" in text and "test" in text
-    assert "max" in text and "unchanged" in text
-    assert "reboot" in text
 
 
 class TestDependentSettings:
@@ -413,7 +354,7 @@ class TestJerkAwareToggle:
     from openpilot.selfdrive.ui.ui_state import ui_state
 
     class _CP:
-      carFingerprint = ""
+      carFingerprint = "HONDA_CIVIC"  # not a TI CX-5: short-circuits the v2 A/B gate
       steerControlType = car.CarParams.SteerControlType.torque
       enableBsm = False
 
@@ -460,7 +401,7 @@ class TestMadsLimitedCallSignature:
 
     class _CP:
       brand = "mazda"
-      carFingerprint = ""
+      carFingerprint = "MAZDA_CX6"  # mazda but not the TI CX-5: short-circuits the v2 A/B gate
       steerControlType = car.CarParams.SteerControlType.torque
       enableBsm = True
 
@@ -477,11 +418,7 @@ class TestMadsLimitedCallSignature:
       ui_state.CP, ui_state.CP_SP = old_cp, old_cp_sp
 
 
-# Everything above drives _update_state() and asserts on widget state, so nothing here ever
-# executed a _draw_content override. That is exactly where the SP widgets reach into upstream
-# internals, and it is how BigButtonSP kept calling BigButton._width_hint() after the
-# 2026-08-24 sync split it into _title_width_hint()/_subtitle_width_hint(): the suite stayed
-# green and the UI died on the first frame with AttributeError. These tests draw.
+    # State-only tests do not cover widget overrides that depend on upstream drawing internals.
 
 LAYOUT_TARGETS = [
   ("cruise", "CruiseLayoutMici"),
@@ -559,3 +496,61 @@ class TestLayoutsSurviveRender:
     from openpilot.selfdrive.ui.sunnypilot.mici.layouts.home import MiciHomeLayoutSP
 
     render(MiciHomeLayoutSP())
+  def test_one_lane_change_control_is_wired_visible_and_summarized(self, params):
+    import pyray as rl
+
+    from openpilot.selfdrive.ui.sunnypilot.mici.layouts.steering import SteeringLayoutMici
+    from openpilot.sunnypilot.selfdrive.controls.lib.auto_lane_change import AutoLaneChangeMode
+    from openpilot.system.ui.lib.multilang import tr
+    from openpilot.system.ui.lib.text_measure import measure_text_cached
+
+    params.put_bool("OneLaneChange", True, block=True)
+    params.put("AutoLaneChangeTimer", AutoLaneChangeMode.NUDGE, block=True)
+    layout = SteeringLayoutMici()
+    control = layout._lc_one_per_signal
+    assert control.param == "OneLaneChange"
+
+    control.render(rl.Rectangle(0, 0, 402, 180))
+    lines = control._label._cached_wrapped_lines
+    assert " ".join(lines).lower() == "one per signal"
+    assert control._label._cached_total_height <= control._label._rect.height
+    assert all(measure_text_cached(control._label._font, line, control._label.font_size).x <= control._label._rect.width
+               for line in lines)
+
+    layout._update_state()
+    assert tr("one-per-signal") in layout._lane_change_btn._badge_labels
+
+  def test_cx5_v2_ab_maps_labels_to_param_values(self, params):
+    from openpilot.selfdrive.ui.sunnypilot.mici.layouts.steering import SteeringLayoutMici
+
+    selector = SteeringLayoutMici()._tq_mazda_v2_mode
+    assert selector._param == "MazdaTorqueV2Mode"
+    assert selector._options == ["A", "B"]
+    assert selector._values == [0, 1]
+
+    for stored, label in ((0, "A"), (1, "B")):
+      params.put("MazdaTorqueV2Mode", stored, block=True)
+      selector.refresh()
+      assert selector.value == label
+
+  def test_cx5_v2_ab_warning_fits_title(self, params):
+    from openpilot.selfdrive.ui.sunnypilot.mici.layouts.steering import SteeringLayoutMici
+    from openpilot.system.ui.lib.text_measure import measure_text_cached
+
+    import pyray as rl
+
+    selector = SteeringLayoutMici()._tq_mazda_v2_mode
+    selector.render(rl.Rectangle(0, 0, 402, 180))
+    label = selector._label
+    lines = label._cached_wrapped_lines
+    text = " ".join(lines).lower()
+
+    assert len(lines) == 3
+    assert label._cached_total_height <= label._rect.height
+    assert all(measure_text_cached(label._font, line, label.font_size).x <= label._rect.width for line in lines)
+    assert "..." not in text
+    assert "b" in text and "5–10 m/s" in text and "test" in text
+    assert "max" in text and "unchanged" in text
+    assert "reboot" in text
+
+

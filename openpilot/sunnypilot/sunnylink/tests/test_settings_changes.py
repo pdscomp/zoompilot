@@ -191,6 +191,44 @@ class TestTorqueOptionGeneration(OpenpilotTestCase):
     assert "options" not in item, "TorqueControlTune must not carry static options; they come from latcontrol_torque_versions.json"
 
 
+class TestReleaseBranchGates(OpenpilotTestCase):
+  @parameterized.expand([
+    "EnableGithubRunner",
+    "QuickBootToggle",
+  ], names=["key"])
+  def test_sp_dev_items_gate_on_is_sp_release(self, schema, key):
+    """sunnypilot dev items must hide on sunnypilot release branches (is_sp_release gate)."""
+    item = _find_item(schema, key)
+    assert item is not None, f"{key} not found in schema"
+    rules = (item.get("visibility") or []) + (item.get("enablement") or [])
+    assert _references_capability_field(rules, "is_sp_release"), f"{key} missing is_sp_release gate"
+
+
+class TestSpuriousOffroadGatesDropped(OpenpilotTestCase):
+  def test_disengage_on_accelerator_has_no_offroad_only(self, schema):
+    item = _find_item(schema, "DisengageOnAccelerator")
+    assert item is not None
+    assert "offroad_only" not in _flatten_rule_types(item.get("enablement"))
+
+  def test_dynamic_experimental_has_no_offroad_only(self, schema):
+    item = _find_item(schema, "DynamicExperimentalControl")
+    assert item is not None
+    assert "offroad_only" not in _flatten_rule_types(item.get("enablement"))
+
+
+class TestNotEngagedReplacement(OpenpilotTestCase):
+  @parameterized.expand([
+    "AlphaLongitudinalEnabled",
+    "ToyotaEnforceStockLongitudinal",
+    "ToyotaStopAndGoHack",
+  ], names=["key"])
+  def test_offroad_only_replaced_with_not_engaged(self, schema, key):
+    """These items should use not_engaged, not offroad_only."""
+    item = _find_item(schema, key)
+    assert item is not None, f"{key} not found"
+    rule_types = _flatten_rule_types(item.get("enablement"))
+    assert "offroad_only" not in rule_types, f"{key} still uses offroad_only"
+    assert "not_engaged" in rule_types, f"{key} missing not_engaged"
 class TestMazdaTorqueV2Mode(OpenpilotTestCase):
   def test_selector_options_text_and_gates(self, schema):
     item = _find_item(schema, "MazdaTorqueV2Mode")

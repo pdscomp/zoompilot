@@ -9,15 +9,10 @@ See the LICENSE.md file in the root directory for more details.
 # controlsd_ext and the settings UIs. Imports nothing heavy so UI code can use it.
 
 import json
-import os
 from enum import IntEnum
+import os
 
 TORQUE_VERSIONS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "latcontrol_torque_versions.json")
-
-
-class MazdaTorqueV2Mode(IntEnum):
-  A = 0
-  B = 1
 
 
 def load_versions() -> dict:
@@ -39,6 +34,11 @@ def resolved_tune_version(params, torque_lateral_tuning: bool = True) -> float |
   if not params.get_bool("EnforceTorqueControl"):
     return 0.0 if torque_lateral_tuning else None
   return float(params.get("TorqueControlTune", return_default=True))
+
+
+class MazdaTorqueV2Mode(IntEnum):
+  A = 0
+  B = 1
 
 
 def mazda_v2_ab_available(params, CP) -> bool:

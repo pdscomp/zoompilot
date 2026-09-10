@@ -12,7 +12,6 @@ from openpilot.common.params import Params
 from openpilot.selfdrive.ui.sunnypilot.layouts.settings.display import OnroadBrightness
 from openpilot.sunnypilot.models.helpers import ACTIVE_BUNDLE_KEYS, get_active_source
 from openpilot.sunnypilot.sunnylink.sunnylink_state import SunnylinkState
-from openpilot.sunnypilot.selfdrive.ui.offroad_mode import request_offroad_mode
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.sunnypilot.widgets.screen_saver import ScreenSaverSP
 
@@ -182,7 +181,7 @@ class UIStateSP:
     self.true_v_ego_ui = self.params.get_bool("TrueVEgoUI")
     self.turn_signals = self.params.get_bool("ShowTurnSignals")
     self.boot_offroad_mode = self.params.get("DeviceBootMode", return_default=True)
-    self.always_offroad = self.params.get_bool("OffroadMode")
+    self.always_offroad = self.params.get_bool("OffroadMode") or self.params.get_bool("OffroadModeRequested")  # applied or pending
     self.screensaver_enabled = self.params.get_bool("ScreenSaverEnabled")
 
     if not self._sp_initialized:
@@ -216,10 +215,8 @@ class UIStateSP:
       if not CP.enableBsm:
         self.params.remove("AutoLaneChangeBsmDelay")
     else:
-      # No CarParams: clear all car-dependent params as safety default. Never while
-      # onroad: on a fresh install's first drive, card seeds car-dependent defaults
-      # (e.g. the Mazda torque-control stack) during init, before CarParamsPersistent
-      # is written, and this wipe would race it and silently undo the seed.
+      # Clear car-dependent params only offroad. During first-drive initialization, card may
+      # seed defaults before CarParamsPersistent is available.
       if not self.started:
         self.params.remove("EnforceTorqueControl")
         self.params.remove("NeuralNetworkLateralControl")
@@ -248,6 +245,16 @@ class UIStateSP:
       self.params.remove("SmartCruiseDecelOvershoot")
 
 
+def set_always_offroad(params: Params, enable: bool) -> None:
+  """Entering is brokered by hardwared (OffroadModeRequested) so a silenced stock ECU is handed
+  back before pandad sees OffroadMode; exiting clears both."""
+  if enable:
+    params.put_bool("OffroadModeRequested", True)
+  else:
+    params.put_bool("OffroadMode", False)
+    params.put_bool("OffroadModeRequested", False)
+
+
 class DeviceSP:
   def __init__(self):
     self._blocked_by_screensaver: bool = False
@@ -269,7 +276,7 @@ class DeviceSP:
 
     # blocked runs every frame, so write only when actually sleeping
     if _ui_state.boot_offroad_mode == 1 and not on and not self._blocked_by_screensaver:
-      request_offroad_mode(_ui_state.params, True)
+      _ui_state.params.put_bool("OffroadMode", True)
 
   def dismiss_screensaver(self, _ui_state) -> None:
     if gui_app.get_active_widget() == _ui_state.screensaver:

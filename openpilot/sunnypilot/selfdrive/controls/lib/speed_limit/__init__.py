@@ -20,6 +20,9 @@ CONFIRM_SPEED_THRESHOLD = {
   False: 50,  # mph
 }
 
+# The card-side cruise stack cannot import selfdrive.car.cruise (it imports cruise_ext at
+# module top, before its constants exist), so this is the one fork copy of the unset
+# sentinel; test_cruise_constants pins it to upstream's value.
 V_CRUISE_UNSET = 255.
 
 # shared by the pcm machine (plannerd), the cruise arbiter (card), and the mirror
