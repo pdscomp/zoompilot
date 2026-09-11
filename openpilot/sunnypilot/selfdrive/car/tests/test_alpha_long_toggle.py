@@ -5,11 +5,19 @@ This file is part of zoompilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
 from opendbc.car import structs
+import pytest
+
+from openpilot.cereal import custom
+from opendbc.car.structs import car
+from opendbc.car.mazda.radar_session import RADAR_RESTORE_FRAMES, RADAR_SESSION_LIMIT_FRAMES, RadarSessionManager, RadarSessionState
+from opendbc.car.mazda.values import CarControllerParams
+from openpilot.selfdrive.car.helpers import convert_carControlSP
 from openpilot.sunnypilot.selfdrive.car.alpha_long_toggle import AlphaLongToggleMonitor, \
   STANDSTILL_V, STANDSTILL_T, StandstillGate
 
-from opendbc.car.mazda.radar_session import RADAR_SESSION_LIMIT_FRAMES
-from openpilot.sunnypilot.selfdrive.car.tests.fakes import FakeParams
+from openpilot.sunnypilot.selfdrive.car.stock_ecu_handback import StockEcuHandBackGate
+from openpilot.sunnypilot.selfdrive.car.tests.fakes import FakeClock, FakeParams
+from openpilot.sunnypilot.system.hardware.hardwared_ext import HardwaredExt
 
 MOVING_V = 12.0
 
@@ -38,7 +46,8 @@ def _monitor(toggle: bool, brand="mazda", op_long=True, alpha_avail=True, cycle_
   return m, params
 
 
-def _step(monitor, restored=False, restore_failed=False, acc_faulted=False, enabled=False, v_ego=0.0, can_valid=True):
+def _step(monitor, restored=False, restore_failed=False, acc_faulted=False, enabled=False,
+          v_ego=0.0, can_valid=True, flush_params=True):
   if monitor.session is not None:
     monitor.session.handback_completed = restored
     monitor.session.handback_failed = restore_failed
@@ -50,6 +59,8 @@ def _step(monitor, restored=False, restore_failed=False, acc_faulted=False, enab
   cc.enabled = enabled
   cc_sp = structs.CarControlSP()
   monitor.update(cs, cc, cc_sp)
+  if flush_params:
+    monitor.update_params()
   return cc_sp
 
 
@@ -345,3 +356,225 @@ class TestExternalStop:
     params.put_bool("StockEcuHandBackDone", False)
     _step(m, restored=True)
     assert not params.get_bool("StockEcuHandBackDone")
+
+
+class TestOffroadCancellation:
+  @staticmethod
+  def _start_request(m, params):
+    ext = HardwaredExt(params)
+    ext.handback.now = FakeClock()
+    params.put_bool("OffroadModeRequested", True)
+    assert not ext.update(started=True)
+    assert not params.get_bool("StockEcuHandBackRequested")
+    return ext
+
+  def test_cancel_before_sampling_or_before_disengagement(self):
+    for sampled in (False, True):
+      m, params = _monitor(toggle=True)
+      ext = self._start_request(m, params)
+      if sampled:
+        m.update_params()
+        assert not _step(m, enabled=True, flush_params=False).stockEcuHandBack
+      params.put_bool("OffroadModeRequested", False)
+      m.update_params()
+      assert not _step(m, flush_params=False).stockEcuHandBack
+      assert not m.handback_started
+      assert not m.handback_requested
+      assert not params.get_bool("StockEcuHandBackDone")
+      assert not params.get_bool("OnroadCycleRequested")
+      assert not ext.update(started=True)
+      assert not ext.handback.pending
+      params.put_bool("OffroadModeRequested", True)
+      assert not ext.update(started=True)
+      m.update_params()
+      assert _step(m).stockEcuHandBack
+
+  def test_cancel_after_start_finishes_then_cycles_safely(self):
+    m, params = _monitor(toggle=True, parked=False)
+    ext = self._start_request(m, params)
+    m.update_params()
+    assert _step(m, v_ego=MOVING_V).stockEcuHandBack
+    params.put_bool("OffroadModeRequested", False)
+    assert not ext.update(started=True)
+    m.update_params()
+    for kw in (
+      {"restore_failed": True},
+      {"restored": True, "v_ego": MOVING_V},
+      {"restored": True, "enabled": True},
+      {"restored": True, "can_valid": False},
+    ):
+      assert _step(m, **kw).stockEcuHandBack
+      assert not m.done
+      assert not params.get_bool("OnroadCycleRequested")
+    for _ in range(m.standstill.frames_needed + 1):
+      assert _step(m, restored=True).stockEcuHandBack
+      if m.done:
+        break
+    assert m.done
+    assert params.get_bool("StockEcuHandBackDone")
+    assert params.get_bool("AlphaLongCycleAttempted")
+    assert params.get_bool("OnroadCycleRequested")
+    assert not params.get_bool("OffroadMode")
+    assert not params.get_bool("OffroadModeRequested")
+    assert not ext.update(started=True)
+    assert ext.update(started=True)
+    assert not params.get_bool("OnroadCycleRequested")
+    assert _step(m, restored=True).stockEcuHandBack
+    assert not params.get_bool("OnroadCycleRequested")
+
+  def test_manager_stop_survives_cancellation_before_or_after_start(self):
+    for already_started in (False, True):
+      m, params = _monitor(toggle=True, parked=False)
+      ext = self._start_request(m, params)
+      m.update_params()
+      cc_sp = _step(m, enabled=not already_started, v_ego=MOVING_V)
+      assert cc_sp.stockEcuHandBack == already_started
+      manager_gate = StockEcuHandBackGate(params, now=FakeClock())
+      assert not manager_gate.ready(started=True)
+      params.put_bool("OffroadModeRequested", False)
+      assert not ext.update(started=True)
+      assert params.get_bool("StockEcuHandBackRequested")
+      m.update_params()
+      assert _step(m, v_ego=MOVING_V).stockEcuHandBack
+      assert _step(m, restored=True, v_ego=MOVING_V).stockEcuHandBack
+      assert manager_gate.ready(started=True)
+      assert not params.get_bool("OnroadCycleRequested")
+      assert not params.get_bool("OffroadMode")
+
+  def test_applying_offroad_cannot_look_like_cancellation_between_writes(self):
+    m, params = _monitor(toggle=True)
+    ext = self._start_request(m, params)
+    m.update_params()
+    assert _step(m).stockEcuHandBack
+    assert _step(m, restored=True).stockEcuHandBack
+    assert params.get_bool("StockEcuHandBackDone")
+    put_bool = params.put_bool
+
+    def observe_write(key, value, **kwargs):
+      put_bool(key, value, **kwargs)
+      if key in ("OffroadMode", "OffroadModeRequested"):
+        m.update_params()
+        assert _step(m, restored=True, flush_params=False).stockEcuHandBack
+        assert not m.done
+
+    params.put_bool = observe_write
+    try:
+      assert not ext.update(started=True)
+    finally:
+      params.put_bool = put_bool
+    assert params.get_bool("OffroadMode")
+    assert not params.get_bool("OffroadModeRequested")
+    assert not params.get_bool("OnroadCycleRequested")
+    params.put_bool("OffroadMode", False)
+    m.update_params()
+    assert _step(m, restored=True).stockEcuHandBack
+    assert params.get_bool("OnroadCycleRequested")
+
+  def test_control_update_has_no_params_access_and_flushes_once(self):
+    for external in (False, True):
+      m, params = _monitor(toggle=external)
+      if external:
+        params.put_bool("StockEcuHandBackRequested", True)
+        m.update_params()
+      m.params = None
+      try:
+        assert _step(m, restored=True, flush_params=False).stockEcuHandBack
+      finally:
+        m.params = params
+      assert not params.get_bool("StockEcuHandBackDone")
+      assert not params.get_bool("OnroadCycleRequested")
+      m.update_params()
+      key = "StockEcuHandBackDone" if external else "OnroadCycleRequested"
+      assert params.get_bool(key)
+      if not external:
+        assert params.get_bool("AlphaLongCycleAttempted")
+      params.put_bool(key, False)
+      m.update_params()
+      assert not params.get_bool(key)
+
+
+def _mads_radar_monitor(*, toggle=True, op_long=True):
+  # The fake session flags are replaced by a real radar session manager driven through
+  # the production CC_SP conversion, so lateral/MADS engagement is what the code reads.
+  monitor, params = _monitor(toggle=toggle, op_long=op_long, parked=False)
+  if op_long:
+    monitor.session = RadarSessionManager()
+    monitor.session.update(True, False, False, True, False, True, frame=0)
+    assert monitor.session.state == RadarSessionState.SILENCED
+  frame = 0
+
+  def step(mode="disabled", *, alive=False, v_ego=0.0, can_valid=True, can_timeout=False):
+    nonlocal frame
+    frame += 1
+    cc = car.CarControl.new_message(enabled=mode == "longitudinal",
+                                    latActive=mode in ("active", "lateral"))
+    wire = custom.CarControlSP.new_message()
+    wire.mads.available = True
+    wire.mads.enabled = mode in ("active", "paused")
+    wire.mads.active = mode == "active"
+    wire.mads.state = {"active": "enabled", "paused": "paused"}.get(mode, "disabled")
+    cc_sp = convert_carControlSP(wire.as_reader())
+    cs = structs.CarState(canValid=can_valid, canTimeout=can_timeout, vEgo=v_ego)
+    monitor.update(cs, cc.as_reader(), cc_sp)
+    if monitor.session is not None:
+      monitor.session.update(True, alive, cc_sp.stockEcuHandBack,
+                             v_ego < STANDSTILL_V, False, not alive,
+                             bus_healthy=can_valid and not can_timeout, frame=frame)
+    monitor.update_params()
+    return cc_sp
+
+  return monitor, params, step
+
+
+@pytest.mark.parametrize("mode", ["longitudinal", "lateral", "active", "paused"])
+@pytest.mark.parametrize("request_kind", ["offroad", "manager", "toggle", "no_session"])
+def test_mads_fresh_actions_wait_for_disengagement(mode, request_kind):
+  monitor, params, step = _mads_radar_monitor(toggle=request_kind != "toggle",
+                                              op_long=request_kind != "no_session")
+  if request_kind in ("offroad", "manager"):
+    key = "OffroadModeRequested" if request_kind == "offroad" else "StockEcuHandBackRequested"
+    params.put_bool(key, True)
+    monitor.update_params()
+  for _ in range(monitor.standstill.frames_needed + 1):
+    assert not step(mode).stockEcuHandBack
+    assert not monitor.handback_started
+    assert not params.get_bool("OnroadCycleRequested")
+  cc_sp = step()
+  if request_kind == "no_session":
+    assert params.get_bool("OnroadCycleRequested")
+  else:
+    assert cc_sp.stockEcuHandBack
+
+
+@pytest.mark.parametrize("mode", ["longitudinal", "lateral", "active", "paused"])
+@pytest.mark.parametrize("request_kind", ["cancelled_offroad", "toggle"])
+def test_mads_restoration_continues_but_cycle_waits(mode, request_kind):
+  monitor, params, step = _mads_radar_monitor(toggle=request_kind != "toggle")
+  if request_kind == "cancelled_offroad":
+    params.put_bool("OffroadModeRequested", True)
+    monitor.update_params()
+  for _ in range(monitor.standstill.frames_needed):
+    step()
+  assert monitor.handback_started
+  assert not monitor.restored
+  if request_kind == "cancelled_offroad":
+    params.put_bool("OffroadModeRequested", False)
+    monitor.update_params()
+  budget = CarControllerParams.RADAR_UDS_STEP + RADAR_RESTORE_FRAMES + monitor.standstill.frames_needed
+  for _ in range(budget):
+    assert step(mode, alive=True).stockEcuHandBack
+    assert not params.get_bool("OnroadCycleRequested")
+  assert monitor.restored  # real stock-traffic window, not a stubbed success flag
+
+  # Fully disengaged alone is insufficient: movement and bad CAN reset the debounce.
+  for bad_state in ({"v_ego": MOVING_V}, {"can_valid": False}, {"can_timeout": True}):
+    step(alive=True, **bad_state)
+    assert not params.get_bool("OnroadCycleRequested")
+  for _ in range(monitor.standstill.frames_needed - 1):
+    step(alive=True)
+    assert not params.get_bool("OnroadCycleRequested")
+  step(alive=True)
+  assert params.get_bool("OnroadCycleRequested")
+  assert params.get_bool("AlphaLongCycleAttempted")
+  if request_kind == "cancelled_offroad":
+    assert params.get_bool("StockEcuHandBackDone")

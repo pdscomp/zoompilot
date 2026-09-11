@@ -30,11 +30,12 @@ class HardwaredExt:
     if not (cycle or offroad):
       self.handback.reset()
       return False
-    if not self.handback.ready(started):
+    if not self.handback.ready(started, request=cycle):
       return False
     if offroad:
-      self.params.put_bool("OffroadModeRequested", False, block=True)
+      # Applied state precedes consuming intent; card reads intent before applied.
       self.params.put_bool("OffroadMode", True, block=True)
+      self.params.put_bool("OffroadModeRequested", False, block=True)
     if cycle:
       self.params.put_bool("OnroadCycleRequested", False, block=True)
       self.on_onroad_cycle()

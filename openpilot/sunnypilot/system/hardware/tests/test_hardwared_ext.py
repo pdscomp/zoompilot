@@ -66,7 +66,7 @@ class TestOffroadModeRequest:
     ext, params, _ = _ext(OffroadModeRequested=True)
     assert not ext.update(started=True)
     assert not params.get_bool("OffroadMode")
-    assert params.get_bool("StockEcuHandBackRequested")
+    assert not params.get_bool("StockEcuHandBackRequested")
     params.put_bool("StockEcuHandBackDone", True)
     assert not ext.update(started=True)
     assert params.get_bool("OffroadMode")
@@ -79,3 +79,30 @@ class TestOffroadModeRequest:
     params.put_bool("OffroadModeRequested", False)
     ext.update(started=True)
     assert not ext.handback.pending
+
+  def test_cycle_promotes_an_existing_offroad_wait(self):
+    ext, params, _ = _ext(OffroadModeRequested=True)
+    assert not ext.update(started=True)
+    assert not params.get_bool("StockEcuHandBackRequested")
+    params.put_bool("OnroadCycleRequested", True)
+    assert not ext.update(started=True)
+    assert params.get_bool("StockEcuHandBackRequested")
+    params.put_bool("OffroadModeRequested", False)
+    assert not ext.update(started=True)
+    assert params.get_bool("OnroadCycleRequested")
+    assert params.get_bool("StockEcuHandBackRequested")
+    params.put_bool("StockEcuHandBackDone", True)
+    assert ext.update(started=True)
+    assert not params.get_bool("OffroadMode")
+
+  def test_withdrawal_starts_a_fresh_timeout_on_retry(self):
+    ext, params, clock = _ext(OffroadModeRequested=True)
+    assert not ext.update(started=True)
+    params.put_bool("OffroadModeRequested", False)
+    assert not ext.update(started=True)
+    assert not ext.handback.pending
+    clock.t = HANDBACK_WAIT_T + 1
+    params.put_bool("OffroadModeRequested", True)
+    assert not ext.update(started=True)
+    assert not ext.update(started=True)
+    assert not params.get_bool("OffroadMode")

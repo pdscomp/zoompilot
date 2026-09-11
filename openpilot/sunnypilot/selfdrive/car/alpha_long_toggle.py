@@ -64,18 +64,20 @@ class AlphaLongToggleMonitor:
     self.session = stock_ecu_session
     self.op_long = CP.openpilotLongitudinalControl
     self.alpha_available = CP.alphaLongitudinalAvailable
-    self.toggle_enabled = self.op_long
+    self._params_snapshot = (self.op_long, False, False)
     self.handback_started = False
     self.done = False
     self.repeat_logged = False
     self.restore_failure_logged = False
-    self.handback_requested = False   # an external stop asked for the hand-back
+    self.handback_requested = False   # irrevocable manager stop/onroad cycle
     self.toggle_handback = False      # the toggle path started the hand-back and owns the cycle
     self.handback_answered = False
+    self._handback_answer_written = False
+    self._cycle_written = False
     self.standstill = StandstillGate(1 / DT_CTRL)
     # One cycle per ignition: the marker is CLEAR_ON_IGNITION_ON and card restarts on the
     # cycle, so a mismatch that survives the restart would otherwise cycle forever. Read
-    # once; request_cycle is the only writer and it latches done.
+    # once; request_cycle latches done and update_params persists the attempt once.
     self.cycle_attempted = params.get_bool("AlphaLongCycleAttempted")
     if self.cycle_attempted and params.get_bool("AlphaLongitudinalEnabled") == self.op_long:
       # the cycle took; a later flip this ignition is a new request, not a persisting one
@@ -83,14 +85,21 @@ class AlphaLongToggleMonitor:
       self.cycle_attempted = False
 
   def update_params(self) -> None:
-    # called from card's 10 Hz params thread
-    self.toggle_enabled = self.params.get_bool("AlphaLongitudinalEnabled")
-    if not self.handback_requested:
-      self.handback_requested = self.params.get_bool("StockEcuHandBackRequested")
+    # Publish a coherent input snapshot; never clear controls-owned latches here.
+    toggle_enabled = self.params.get_bool("AlphaLongitudinalEnabled")
+    committed_stop = self.params.get_bool("StockEcuHandBackRequested")
+    offroad = self.params.get_bool("OffroadModeRequested") or self.params.get_bool("OffroadMode")
+    self._params_snapshot = (toggle_enabled, committed_stop, offroad)
+    # Persist each controls-thread action once, restoration before recovery cycle.
+    if self.handback_answered and not self._handback_answer_written:
+      self.params.put_bool("StockEcuHandBackDone", True, block=True)
+      self._handback_answer_written = True
+    if self.done and not self._cycle_written:
+      self.params.put_bool("AlphaLongCycleAttempted", True, block=True)
+      self.params.put_bool("OnroadCycleRequested", True, block=True)
+      self._cycle_written = True
 
   def request_cycle(self) -> None:
-    self.params.put_bool("AlphaLongCycleAttempted", True)
-    self.params.put_bool("OnroadCycleRequested", True)
     self.done = True
 
   @property
@@ -103,17 +112,23 @@ class AlphaLongToggleMonitor:
 
   def update(self, CS: structs.CarState, CC: structs.CarControl, CC_SP: structs.CarControlSP) -> None:
     """Runs at 100 Hz from controls_update, before CI.apply."""
-    # tracked every frame so a flip made while parked is acted on at once; the last zero
-    # speed before a CAN outage is not a parked vehicle
+    toggle_enabled, committed_stop, offroad = self._params_snapshot
+    self.handback_requested |= committed_stop
+    external_stop = self.handback_requested or offroad
     stopped = self.standstill.update(CS.vEgo if CS.canValid and not CS.canTimeout else float("inf"))
-    self._serve_external_stop(CC, CC_SP)
-    # Keep hand-back asserted once started because CC_SP is rebuilt each frame and the session
-    # manager treats a cleared request as a new takeover.
+    # MADS stays engaged while paused, even with longitudinal/lateral output inactive.
+    engaged = CC.enabled or CC.latActive or CC_SP.mads.enabled
+    self._serve_external_stop(CC_SP, external_stop, engaged=engaged)
     if self.handback_started:
       CC_SP.stockEcuHandBack = True
     if self.done:
       return
-    toggle_mismatch = self.alpha_available and self.toggle_enabled != self.op_long
+    if self.handback_started and not external_stop and not self.toggle_handback:
+      if self.restored and not engaged and stopped:
+        self._answer_external_stop()
+        self.request_cycle()
+      return
+    toggle_mismatch = self.alpha_available and toggle_enabled != self.op_long
     if toggle_mismatch and self.cycle_attempted:
       if not self.repeat_logged:
         cloudlog.warning("alpha long toggle mismatch persists after this ignition's onroad cycle, not cycling again")
@@ -126,11 +141,11 @@ class AlphaLongToggleMonitor:
     # Once started, hand-back remains asserted while the final cycle waits.
     if self.session is None:
       # No ECU hand-back is required when enabling or on unaffected platforms.
-      if not CC.enabled and stopped:
+      if not engaged and stopped:
         self.request_cycle()
       return
 
-    if not self.handback_started and (CC.enabled or not stopped):
+    if not self.handback_started and (engaged or not stopped):
       return
 
     self.toggle_handback = True
@@ -141,18 +156,18 @@ class AlphaLongToggleMonitor:
     if self.restore_failed and not self.restore_failure_logged:
       cloudlog.error("Mazda radar restoration failed; waiting for stock traffic before cycling")
       self.restore_failure_logged = True
-    if self.restored and not CC.enabled and stopped:
+    if self.restored and not engaged and stopped:
       self.request_cycle()
 
-  def _serve_external_stop(self, CC: structs.CarControl, CC_SP: structs.CarControlSP) -> None:
-    if not self.handback_requested or self.handback_answered:
+  def _serve_external_stop(self, CC_SP: structs.CarControlSP, requested: bool, *, engaged: bool) -> None:
+    if not requested or self.handback_answered:
       return
     if self.session is None:
       self._answer_external_stop()
       return
     # Never start on an engaged car: the hand-back revokes availability under the driver.
     # Once started (by either path) it runs to its end.
-    if not self.handback_started and CC.enabled:
+    if not self.handback_started and engaged:
       return
     self.handback_started = True
     CC_SP.stockEcuHandBack = True
@@ -162,5 +177,4 @@ class AlphaLongToggleMonitor:
       self._answer_external_stop()
 
   def _answer_external_stop(self) -> None:
-    self.params.put_bool("StockEcuHandBackDone", True)
     self.handback_answered = True
