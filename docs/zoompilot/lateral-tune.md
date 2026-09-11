@@ -1,4 +1,42 @@
-# Lateral tune: v2 torque controller, shared layer and speed-bin learner
+# Lateral tune: zoom-more runtime and upstream research
+
+## Current zoom-more runtime contract
+
+The research sections below describe the upstream v2 rewrite and its measured route
+experiments. They are retained for attribution, not as a statement that every upstream
+removal landed in this fork. In particular, the later “What left v2” table is historical
+upstream context; it is not a deletion checklist for zoom-more.
+
+The current fork retains v2's plan-secant jerk source, request/plan divergence blend,
+stale-model handling, low-speed lead fade, roll/offset fade, unwind handling, low-speed
+error boost and Mazda TI A/B behavior. These remain executable in
+`openpilot/sunnypilot/selfdrive/controls/lib/latcontrol_torque_v2.py` and are covered by
+`openpilot/sunnypilot/selfdrive/controls/tests/test_latcontrol_torque_v2.py`.
+The active clipping constant is `MAX_SETPOINT_LATERAL_JERK`; historical references to
+`MAX_FRICTION_JERK` below describe upstream's different implementation.
+
+The shared extension applies the measured native-EPS rail only to native-EPS host
+control. Mazda TI uses full normalized host authority and its existing independent
+600-count CAN ceiling, feedback, driver-torque and rate checks. v0/v1/NNLC share that
+host policy; v2 consumes the same effective schedule. This does not remove the native
+EPS clamp in the Mazda car controller.
+
+v2 suppresses only the derivative input while `steeringPressed` is true; its measurement
+filter continues updating. Integrator freeze, release decay/ramp and the existing KD
+schedule retain their independent jobs. v0 retains the fork's scoped low-speed gain cap;
+it must not be described as byte-identical to the unmodified upstream controller here.
+
+Speed bins are published and persisted in `LiveTorqueParametersSP` on
+`customReserved19`; the global `lateralTorqueParameters` message remains separate.
+Legacy inline schema fields remain readable for old logs but are not populated by the
+new producer. Bin-filter restore uses per-bin validity rather than unrelated global-fit
+validity, after the existing identity/version/shape/bounds guards.
+
+These are software contracts, not new vehicle-measurement claims. The historical route
+numbers below must not be presented as validation of the repaired integration until an
+explicitly authorized, same-build vehicle check has been performed.
+
+## Upstream research and historical measurements
 
 This is where the measurements live. The source files carry one to three lines of what and
 why per mechanism; every number, route id, attribution study and rejected alternative that
@@ -16,7 +54,7 @@ Mazda seed).
 
 | version | what it is | selected by |
 |---|---|---|
-| v0 | sunnypilot's `latcontrol_torque_v0.py`: setpoint == the live request, error corrected in lateral-accel space, the extension owning the feedforward params. Byte-identical to sunnypilot's; the only change it sees is the corrected `steer_limited_by_safety` flag from the classifier. | `TorqueControlTune = 0.0`, and any torque car with Enforce Torque Control off (`torque_tune.resolved_tune_version`) |
+| v0 | sunnypilot's `latcontrol_torque_v0.py`: setpoint == the live request, error corrected in lateral-accel space, the extension owning the feedforward params. The fork additionally scopes the low-speed KP cap for Mazda TI; historical upstream comparisons below are not byte-identity claims for this branch. | `TorqueControlTune = 0.0`, and any torque car with Enforce Torque Control off (`torque_tune.resolved_tune_version`) |
 | v1 | sunnypilot's current `LatControlTorque` (the `lac` controlsd built), untouched | `TorqueControlTune = 1.0` |
 | v2 | v0 plus the four mechanisms below | `TorqueControlTune = 2.0`; seeded on steer-to-zero Mazdas by `_seed_mazda_torque_defaults` (`MAZDA_STEER_TO_ZERO_TORQUE_TUNE = 2.0`) |
 
@@ -200,25 +238,26 @@ that goes NaN with valid data. Bins come from `speed_dependent.toml` (CX-5:
 6.5, 9.5, 12.0, 16.4, 21.0, 28.0, 35.0 m/s, refreshed 2026-08-19 from the device cache) or
 the defaults seeded with the global offline values.
 
-Wire. The per-bin values do not ride on `lateralTorqueParameters` (comma's struct, which an
-upstream sync would collide on). torqued_ext publishes its own `liveTorqueParametersSP`
+Wire. The per-bin values do not ride on the populated legacy fields of
+`lateralTorqueParameters`; the fork publishes its own `liveTorqueParametersSP`
 message beside every upstream one, at the same 4 Hz cadence and validity: `version`,
 `speedBinCenters`, `speedBinLatAccelFactors`, `speedBinFrictions`, `speedBinValid`,
 `speedBinPoints` (empty on the wire). On the wire the service is `customReserved19`, the
-last of sunnypilot's reserved Event slots, so `log.capnp` stays byte-identical to upstream;
-`torqued_ext.LIVE_TORQUE_PARAMETERS_SP_SERVICE` names it and `LiveTorqueParametersSP`
-aliases the struct (`custom.CustomReserved19`).
+last of sunnypilot's reserved Event slots; the legacy inline fields stay declared for
+old-log readers but new producers leave them empty. `torqued_ext.LIVE_TORQUE_PARAMETERS_SP_SERVICE`
+names it and `LiveTorqueParametersSP` aliases the struct (`custom.CustomReserved19`).
 
 Cache. torqued writes `LiveTorqueParameters` every 240 frames (60 s) with `with_points=True`;
 that same call is the extension's hook, which writes the same fork struct with the point
 buckets filled to `LiveTorqueParametersSP`. Upstream's cache keeps the restore key, decay
-and the valid flag; the fork's carries its own `version`, the centers, the values and the
-points.
+and the global valid flag; the fork's carries its own `version`, `seedVersion`, centers,
+per-bin validity, values and points.
 
 Restore (`_restore_ext_cache`, guards added 2026-09-02 in `fbabecf35c`): both caches
 must carry upstream's restore key (fingerprint, tuning type, offline seeds, VERSION, via
-`CarParamsPrevRoute`) and the fork cache this config's `seed_version` and bin centers; filtered values are
-taken only when upstream's cache was written valid; anything non-finite or outside a bin's
+`CarParamsPrevRoute`) and the fork cache this config's `seed_version` and bin centers; each
+filtered bin is restored only when that bin's `speedBinValid` flag is set, independently of
+the global fit's higher-speed validity. Anything non-finite or outside a bin's
 clip range rejects the whole cache, because the bins are one interpolated tune and a partial
 restore leaves a step between a cached bin and a re-seeded neighbour. The decay is restored
 from upstream's cache rather than reset to MIN each boot (which had made the bins re-learn
