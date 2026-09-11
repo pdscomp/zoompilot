@@ -7,6 +7,7 @@ See the LICENSE.md file in the root directory for more details.
 
 import numpy as np
 
+from opendbc.car.mazda.values import MazdaFlags
 from opendbc.sunnypilot.car.interfaces import get_steer_rail_schedule
 from openpilot.sunnypilot.selfdrive.controls.lib.nnlc.nnlc import NeuralNetworkLateralControl
 from openpilot.sunnypilot.selfdrive.controls.lib.latcontrol_torque_ext_override import LatControlTorqueExtOverride
@@ -17,10 +18,12 @@ class LatControlTorqueExt(NeuralNetworkLateralControl, LatControlTorqueExtOverri
     NeuralNetworkLateralControl.__init__(self, lac_torque, CP, CP_SP, CI)
     LatControlTorqueExtOverride.__init__(self, CP)
     self._output_overrides_disabled = False
-    # EPS ceiling as a fraction of the carcontroller's scale, by speed (None: full scale
-    # everywhere). Applied to the host as steer_max, so every tune's own update_limits() and
-    # saturation test land on the rail with no tune changes. See docs/zoompilot/lateral-tune.md.
-    self.steer_rail_schedule = get_steer_rail_schedule(CP)
+    # The native-EPS ceiling applies only when native EPS is the host actuator's limiting
+    # envelope. TI is clamped separately in carcontroller and has its own 600-count scale.
+    self.steer_rail_schedule = (
+      None if CP.brand == "mazda" and CP.flags & MazdaFlags.TORQUE_INTERCEPTOR
+      else get_steer_rail_schedule(CP)
+    )
     # this frame's command, for controlsd_ext: update() only runs on active frames, so the
     # per-frame update_override_torque_params call clears the mark and update() sets it
     self._commanded = False

@@ -11,7 +11,6 @@ from collections import deque
 from openpilot.cereal import log
 from opendbc.car.lateral import get_friction
 from opendbc.car.mazda.values import MazdaFlags
-from opendbc.sunnypilot.car.interfaces import get_steer_rail_schedule
 from openpilot.common.constants import ACCELERATION_DUE_TO_GRAVITY
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.realtime import DT_MDL
@@ -184,7 +183,7 @@ class LatControlTorque(LatControlTorqueV0):
     # The extension applies it to the host's steer_max per frame (its
     # update_override_torque_params reports the change and the host re-limits the PID);
     # kept here for the saturation alert's at-rail gating below.
-    self.steer_rail_schedule = get_steer_rail_schedule(CP)
+    self.steer_rail_schedule = self.extension.steer_rail_schedule
     # Planned-curvature cache for the setpoint jerk source (see the block comment above the
     # constants). Rebuilt only when a new modelV2 frame arrives (~20 Hz), not at 100 Hz.
     self._plan_curvature = None

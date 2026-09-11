@@ -25,6 +25,8 @@ from openpilot.cereal import custom
 from openpilot.common.params import Params
 from openpilot.common.prefix import OpenpilotPrefix
 from openpilot.sunnypilot.selfdrive.controls.lib.latcontrol_torque_v0 import LatControlTorque as LatControlTorqueV0
+from openpilot.selfdrive.controls.lib.latcontrol_torque import LatControlTorque as LatControlTorqueV1
+from openpilot.sunnypilot.selfdrive.controls.lib.latcontrol_torque_v2 import LatControlTorque as LatControlTorqueV2
 
 DT = 0.01
 LAT_DELAY = 0.3
@@ -271,3 +273,45 @@ class TestRailLimitedPid:
       lac.update(True, make_cs(v_ego, 0.0), VM, LP, False, demand, None, False, LAT_DELAY)
     # unconstrained, ki * dt * error * 200 frames would be ~1.8
     assert lac.pid.i < 0.05
+
+
+@pytest.mark.parametrize("host_cls", [LatControlTorqueV0, LatControlTorqueV1, LatControlTorqueV2])
+def test_ti_host_keeps_full_authority_across_eps_rail(params, host_cls):
+  cp = make_cp(mazda=True).as_builder()
+  cp.carFingerprint = "MAZDA_CX5"
+  cp.steerAtStandstill = True
+  cp.flags |= int(MazdaFlags.TORQUE_INTERCEPTOR)
+  lac = host_cls(cp.as_reader(), custom.CarParamsSP.new_message().as_reader(), make_ci(), DT)
+
+  # The physical native EPS still has a rail; only TI's host policy excludes it.
+  assert get_steer_rail_schedule(cp) is not None
+  for speed in (5.0, 14.2, 14.5, 25.0):
+    lac.extension._last_vego = speed
+    lac.extension.update_override_torque_params(lac.torque_params)
+    lac.update_limits()
+    assert lac.extension.steer_rail_schedule is None
+    assert lac.steer_max == 1.0
+    assert lac.pid.pos_limit == pytest.approx(LAF)
+    assert lac.pid.neg_limit == pytest.approx(-LAF)
+    if host_cls is LatControlTorqueV2:
+      assert lac.steer_rail_schedule is lac.extension.steer_rail_schedule
+
+
+def test_ti_nnlc_limit_dispatch_keeps_unit_torque_limits(params):
+  cp = make_cp(mazda=True).as_builder()
+  cp.carFingerprint = "MAZDA_CX5"
+  cp.steerAtStandstill = True
+  cp.flags |= int(MazdaFlags.TORQUE_INTERCEPTOR)
+  lac = LatControlTorqueV0(cp.as_reader(), custom.CarParamsSP.new_message().as_reader(), make_ci(), DT)
+  # Isolate NNLC's existing limit dispatch, not neural-network prediction quality.
+  lac.extension.enabled = True
+  lac.extension.has_nn_model = True
+  lac.extension.model_valid = True
+  assert lac.extension.overrides_output
+  for speed in (14.2, 14.5):
+    lac.extension._last_vego = speed
+    lac.extension.update_override_torque_params(lac.torque_params)
+    lac.update_limits()
+    assert lac.steer_max == 1.0
+    assert lac.pid.pos_limit == 1.0
+    assert lac.pid.neg_limit == -1.0
