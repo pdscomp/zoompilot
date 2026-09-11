@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch  # noqa: TID251
 from opendbc.sunnypilot.car.interfaces import get_speed_dep_config, get_speed_dep_config_for_car
 from openpilot.sunnypilot.selfdrive.controls.lib.latcontrol_torque_ext import LatControlTorqueExt
 from openpilot.sunnypilot.selfdrive.controls.lib.latcontrol_torque_ext_override import LatControlTorqueExtOverride
+from openpilot.sunnypilot.selfdrive.controls.tests.speed_dep_helpers import make_torqued_msg
 
 SPEED_DEP_CARS = get_speed_dep_config()
 
@@ -276,8 +277,8 @@ class TestLearnerSanityBounds:
   @patch(PATCH_PARAMS_TORQUED_EXT)
   @patch(PATCH_PARAMS_TORQUED)
   def test_sanity_bounds_allow_learning_without_relaxed(self, mock_params_cls, mock_ext_cls):
-    """With LiveTorqueParamsRelaxedToggle OFF (factor_sanity=0.0),
-    speed bins must still have +/-30% bounds, not (seed, seed)."""
+    """With LiveTorqueParamsRelaxedToggle OFF, upstream's normal sanity constants still
+    give speed bins +/-30% bounds, not (seed, seed)."""
     mock_params_cls.return_value.get.return_value = None
     mock_ext_cls.return_value.get_bool.side_effect = lambda k: {
       'SpeedDependentTorqueToggle': True,
@@ -294,6 +295,7 @@ class TestLearnerSanityBounds:
     CP.lateralTuning.which.return_value = 'torque'
     CP.lateralTuning.torque.latAccelFactor = 2.0
     CP.lateralTuning.torque.friction = 0.15
+    CP.minSteerSpeed = 0.0
 
     est = TorqueEstimator(CP)
     est._on_torque_point(0.1, 0.3, 10.0)  # trigger lazy init
@@ -323,6 +325,7 @@ class TestLearnerSanityBounds:
     CP.lateralTuning.which.return_value = 'torque'
     CP.lateralTuning.torque.latAccelFactor = 2.0
     CP.lateralTuning.torque.friction = 0.15
+    CP.minSteerSpeed = 0.0
 
     est = TorqueEstimator(CP)
     est._on_torque_point(0.1, 0.3, 10.0)
@@ -389,6 +392,10 @@ class TestPerCountLafInterp:
       ovr._speed_dep_steer_max_schedule = schedule
       ovr._speed_dep_laf_per_count_bp = [laf / float(np.interp(c, sm_bp, sm_v))
                                          for laf, c in zip(self.LAF_BP, self.SPEED_BP, strict=True)]
+      ovr._speed_dep_friction_per_count_bp = [
+        fric * float(np.interp(c, sm_bp, sm_v))
+        for fric, c in zip(ovr._speed_dep_friction_bp, self.SPEED_BP, strict=True)
+      ]
 
   def _laf_at(self, ovr, v):
     ovr._last_vego = v
@@ -416,22 +423,27 @@ class TestPerCountLafInterp:
     ovr = make_override()
     self._activate(ovr, schedule=self.SM_SCHEDULE)
     for c, laf in zip(self.SPEED_BP, self.LAF_BP, strict=True):
-      assert self._laf_at(ovr, c) == pytest.approx(laf, abs=1e-9)
+      assert self._laf_at(ovr, c) == float(np.float32(laf))
 
   def test_flat_platform_unchanged(self):
     ovr = make_override()
     self._activate(ovr, schedule=None)
     for v in [10.0, 13.4, 14.35, 15.0, 25.0]:
-      assert self._laf_at(ovr, v) == pytest.approx(float(np.interp(v, self.SPEED_BP, self.LAF_BP)), abs=1e-9)
+      assert self._laf_at(ovr, v) == float(np.float32(np.interp(v, self.SPEED_BP, self.LAF_BP)))
 
-  def test_friction_stays_plain_interp(self):
+  def test_friction_interpolates_in_count_space(self):
     ovr = make_override()
     self._activate(ovr, schedule=self.SM_SCHEDULE)
-    ovr._speed_dep_friction_bp = list(SAMPLE_FRICTION_BP[:len(self.SPEED_BP)])
     ovr._last_vego = 14.35
     tp = TorqueParams()
     ovr.update_override_torque_params(tp)
-    assert tp.friction == pytest.approx(float(np.interp(14.35, self.SPEED_BP, ovr._speed_dep_friction_bp)), abs=1e-9)
+    sm_bp, sm_v = self.SM_SCHEDULE
+    counts = [
+      fric * float(np.interp(c, sm_bp, sm_v))
+      for fric, c in zip(ovr._speed_dep_friction_bp, self.SPEED_BP, strict=True)
+    ]
+    expected = float(np.interp(14.35, self.SPEED_BP, counts)) / float(np.interp(14.35, sm_bp, sm_v))
+    assert tp.friction == float(np.float32(expected))
 
   @patch(PATCH_GET_SPEED_DEP_CONFIG)
   def test_update_speed_dep_torque_builds_per_count_table(self, mock_get_config):
@@ -442,7 +454,7 @@ class TestPerCountLafInterp:
     }
     mock_self = TestUpdateSpeedDepTorqueFallback._make_mock_self()
     mock_tp = TestUpdateSpeedDepTorqueFallback._make_mock_tp(self.SPEED_BP, self.LAF_BP, [0.1] * 7, [True] * 7)
-    LatControlTorqueExt.update_speed_dep_torque(mock_self, mock_tp)
+    LatControlTorqueExt.update_speed_dep_torque(mock_self, *mock_tp)
 
     assert mock_self._speed_dep_steer_max_schedule == self.SM_SCHEDULE
     sm_bp, sm_v = self.SM_SCHEDULE
@@ -456,7 +468,7 @@ class TestPerCountLafInterp:
     }
     mock_self = TestUpdateSpeedDepTorqueFallback._make_mock_self()
     mock_tp = TestUpdateSpeedDepTorqueFallback._make_mock_tp(self.SPEED_BP, self.LAF_BP, [0.1] * 7, [True] * 7)
-    LatControlTorqueExt.update_speed_dep_torque(mock_self, mock_tp)
+    LatControlTorqueExt.update_speed_dep_torque(mock_self, *mock_tp)
 
     assert mock_self._speed_dep_steer_max_schedule is None
     assert mock_self._speed_dep_laf_per_count_bp == []
@@ -466,21 +478,16 @@ class TestUpdateSpeedDepTorqueFallback:
   """Tests for update_speed_dep_torque fallback logic (TOML seeds vs global filtered)."""
 
   @staticmethod
-  def _make_mock_tp(speed_bp, lafs, frictions, valid, global_laf=2.0, global_fric=0.15):
-    tp = MagicMock()
-    tp.speedBinCenters = speed_bp
-    tp.speedBinLatAccelFactors = lafs
-    tp.speedBinFrictions = frictions
-    tp.speedBinValid = valid
-    tp.latAccelFactorFiltered = global_laf
-    tp.frictionCoefficientFiltered = global_fric
-    tp.latAccelOffsetFiltered = 0.0
-    return tp
+  def _make_mock_tp(speed_bp, lafs, frictions, valid, global_laf=2.0, global_fric=0.15, use_params=True):
+    return make_torqued_msg(speed_bp, lafs, frictions, valid,
+                           global_laf=global_laf, global_fric=global_fric, use_params=use_params)
 
   @staticmethod
   def _make_mock_self(fingerprint='TEST_CAR'):
     mock_self = MagicMock()
     mock_self.CP.carFingerprint = fingerprint
+    mock_self.CP.brand = 'test'
+    mock_self.CP.minSteerSpeed = 0.0
     mock_self._speed_dep_active = False
     mock_self._speed_dep_speed_bp = []
     mock_self._speed_dep_lat_accel_factor_bp = []
@@ -501,7 +508,7 @@ class TestUpdateSpeedDepTorqueFallback:
     mock_tp = self._make_mock_tp(SAMPLE_SPEED_BP, [999.0] * 7, [999.0] * 7,
                                  [False] * 7, global_laf=1.0, global_fric=0.05)
 
-    LatControlTorqueExt.update_speed_dep_torque(mock_self, mock_tp)
+    LatControlTorqueExt.update_speed_dep_torque(mock_self, *mock_tp)
 
     assert mock_self._speed_dep_lat_accel_factor_bp == seed_lafs
     assert mock_self._speed_dep_friction_bp == seed_frictions
@@ -515,10 +522,10 @@ class TestUpdateSpeedDepTorqueFallback:
     mock_tp = self._make_mock_tp(SAMPLE_SPEED_BP, [999.0] * 7, [999.0] * 7,
                                  [False] * 7, global_laf=2.0, global_fric=0.15)
 
-    LatControlTorqueExt.update_speed_dep_torque(mock_self, mock_tp)
+    LatControlTorqueExt.update_speed_dep_torque(mock_self, *mock_tp)
 
-    assert mock_self._speed_dep_lat_accel_factor_bp == [2.0] * 7
-    assert mock_self._speed_dep_friction_bp == [0.15] * 7
+    assert mock_self._speed_dep_lat_accel_factor_bp == [mock_tp[0].latAccelFactorFiltered] * 7
+    assert mock_self._speed_dep_friction_bp == [mock_tp[0].frictionCoefficientFiltered] * 7
 
   @patch(PATCH_GET_SPEED_DEP_CONFIG)
   def test_friction_bp_missing_uses_global_fallback(self, mock_get_config):
@@ -532,10 +539,10 @@ class TestUpdateSpeedDepTorqueFallback:
     mock_tp = self._make_mock_tp(SAMPLE_SPEED_BP, [999.0] * 7, [999.0] * 7,
                                  [False] * 7, global_laf=2.0, global_fric=0.15)
 
-    LatControlTorqueExt.update_speed_dep_torque(mock_self, mock_tp)
+    LatControlTorqueExt.update_speed_dep_torque(mock_self, *mock_tp)
 
-    assert mock_self._speed_dep_lat_accel_factor_bp == [2.0] * 7
-    assert mock_self._speed_dep_friction_bp == [0.15] * 7
+    assert mock_self._speed_dep_lat_accel_factor_bp == [mock_tp[0].latAccelFactorFiltered] * 7
+    assert mock_self._speed_dep_friction_bp == [mock_tp[0].frictionCoefficientFiltered] * 7
 
   @patch(PATCH_GET_SPEED_DEP_CONFIG)
   def test_laf_bp_length_mismatch_uses_global_fallback(self, mock_get_config):
@@ -548,10 +555,10 @@ class TestUpdateSpeedDepTorqueFallback:
     mock_tp = self._make_mock_tp(SAMPLE_SPEED_BP, [999.0] * 7, [999.0] * 7,
                                  [False] * 7, global_laf=2.0, global_fric=0.15)
 
-    LatControlTorqueExt.update_speed_dep_torque(mock_self, mock_tp)
+    LatControlTorqueExt.update_speed_dep_torque(mock_self, *mock_tp)
 
-    assert mock_self._speed_dep_lat_accel_factor_bp == [2.0] * 7
-    assert mock_self._speed_dep_friction_bp == [0.15] * 7
+    assert mock_self._speed_dep_lat_accel_factor_bp == [mock_tp[0].latAccelFactorFiltered] * 7
+    assert mock_self._speed_dep_friction_bp == [mock_tp[0].frictionCoefficientFiltered] * 7
 
   @patch(PATCH_GET_SPEED_DEP_CONFIG)
   def test_mixed_valid_invalid_bins(self, mock_get_config):
@@ -569,12 +576,12 @@ class TestUpdateSpeedDepTorqueFallback:
     mock_self = self._make_mock_self()
     mock_tp = self._make_mock_tp(SAMPLE_SPEED_BP, learned_lafs, learned_frictions, valid)
 
-    LatControlTorqueExt.update_speed_dep_torque(mock_self, mock_tp)
+    LatControlTorqueExt.update_speed_dep_torque(mock_self, *mock_tp)
 
     for i in range(7):
       if valid[i]:
-        assert mock_self._speed_dep_lat_accel_factor_bp[i] == learned_lafs[i]
-        assert mock_self._speed_dep_friction_bp[i] == learned_frictions[i]
+        assert mock_self._speed_dep_lat_accel_factor_bp[i] == mock_tp[1].speedBinLatAccelFactors[i]
+        assert mock_self._speed_dep_friction_bp[i] == mock_tp[1].speedBinFrictions[i]
       else:
         assert mock_self._speed_dep_lat_accel_factor_bp[i] == seed_lafs[i]
         assert mock_self._speed_dep_friction_bp[i] == seed_frictions[i]
@@ -586,10 +593,9 @@ class TestUpdateSpeedDepTorqueFallback:
     mock_self = self._make_mock_self()
     mock_self._speed_dep_active = True
 
-    mock_tp = MagicMock()
-    mock_tp.speedBinCenters = []
+    mock_tp = self._make_mock_tp([], [], [], [])
 
-    LatControlTorqueExt.update_speed_dep_torque(mock_self, mock_tp)
+    LatControlTorqueExt.update_speed_dep_torque(mock_self, *mock_tp)
 
     mock_self.disable_speed_dep_torque.assert_called_once()
 
@@ -601,11 +607,10 @@ class TestUpdateSpeedDepTorqueFallback:
     mock_self = self._make_mock_self()
     mock_self._speed_dep_active = True
 
-    mock_tp = MagicMock()
-    mock_tp.useParams = False
-    mock_tp.speedBinCenters = [6.5, 10.0]
+    mock_tp = self._make_mock_tp([6.5, 10.0], [2.0, 2.0], [0.1, 0.1],
+                                 [True, True], use_params=False)
 
-    LatControlTorqueExt.update_speed_dep_torque(mock_self, mock_tp)
+    LatControlTorqueExt.update_speed_dep_torque(mock_self, *mock_tp)
 
     mock_self.disable_speed_dep_torque.assert_called_once()
 
@@ -655,15 +660,17 @@ class TestSeedValidityGate:
 
   @patch(PATCH_GET_SPEED_DEP_CONFIG)
   def test_unflagged_entry_applies_regardless(self, mock_get_config):
-    cfg = {'speed_bp': [10.0]}
+    cfg = {'speed_bp': [10.0, 20.0], 'laf_bp': [1.0, 2.0], 'friction_bp': [0.1, 0.2]}
     mock_get_config.return_value = {'PLAIN_CAR': cfg}
-    assert get_speed_dep_config_for_car(self._cp('PLAIN_CAR', 12.5)) == cfg
+    assert get_speed_dep_config_for_car(self._cp('PLAIN_CAR', 0.0)) == cfg
+    assert get_speed_dep_config_for_car(self._cp('PLAIN_CAR', 12.5)) == {
+      'speed_bp': [20.0], 'laf_bp': [2.0], 'friction_bp': [0.2],
+    }
 
   def test_real_toml_flags_are_as_intended(self):
-    """CX-9 2021 seeds were measured on an EPS-swapped car and must carry the flag;
-    the CX-5 2022 seeds were measured on the stock (steer-to-zero) EPS and must not."""
+    """CX-9 stock-EPS seeds use floor filtering; CX-5 2022 needs no swap-only flag."""
     cars = get_speed_dep_config()
-    assert cars['MAZDA_CX9_2021'].get('requires_steer_to_zero') is True
+    assert 'requires_steer_to_zero' not in cars['MAZDA_CX9_2021']
     assert 'requires_steer_to_zero' not in cars['MAZDA_CX5_2022']
 
 

@@ -8,13 +8,16 @@ import pytest
 
 from unittest.mock import MagicMock, patch  # noqa: TID251
 from opendbc.sunnypilot.car.interfaces import get_speed_dep_config
+from openpilot.cereal import log
 from openpilot.selfdrive.locationd.torqued import (
   TorqueEstimator, TorqueBuckets, VERSION, MIN_FILTER_DECAY,
 )
 from openpilot.sunnypilot.selfdrive.locationd.torqued_ext import (
   DEFAULT_SPEED_BIN_BOUNDS as SPEED_BIN_BOUNDS, DEFAULT_SPEED_BIN_CENTERS as SPEED_BIN_CENTERS,
-  TorqueEstimatorExt,
+  LIVE_TORQUE_PARAMETERS_SP_KEY, LIVE_TORQUE_PARAMETERS_SP_SERVICE, TorqueEstimatorExt,
 )
+from openpilot.sunnypilot.selfdrive.locationd.tests.speed_dep_helpers import FakePubMaster, in_bounds_values
+from openpilot.sunnypilot.selfdrive.locationd.tests.test_torqued_cache_restore import _cache, _sp
 
 # Discover configured cars
 SPEED_DEP_CARS = get_speed_dep_config()
@@ -128,8 +131,9 @@ class TestSpeedBinnedLearning:
     for fingerprint in SPEED_DEP_CARS:
       centers, bounds = _get_car_bins(fingerprint)
       est = TorqueEstimator(make_mock_CP(fingerprint=fingerprint))
-      msg = est.get_msg()
-      ltp = msg.lateralTorqueParameters
+      est._pm = FakePubMaster()
+      est.get_msg()
+      ltp = est._pm.last()
       assert len(ltp.speedBinCenters) == len(centers)
       assert len(ltp.speedBinLatAccelFactors) == len(bounds)
       assert len(ltp.speedBinFrictions) == len(bounds)
@@ -257,7 +261,7 @@ class TestCentersToBounds:
 
 @pytest.mark.skipif(SPEED_DEP_FINGERPRINT is None, reason="No cars in speed_dependent.toml")
 class TestCacheRestore:
-  """Tests for _restore_ext_cache."""
+  """Retained restore coverage using the current global/SP cache contract."""
 
   @patch(PATCH_EXT_PARAMS)
   @patch(PATCH_PARAMS)
@@ -265,22 +269,11 @@ class TestCacheRestore:
     mock_params_cls.return_value.get.return_value = None
     _setup_ext_mock(mock_ext, speed_dep_on=True)
     est = TorqueEstimator(make_mock_CP())
-
-    n_bins = len(est.speed_bin_bounds)
-    cached_lafs = [float(i + 1) for i in range(n_bins)]
-    cached_frictions = [float(i) * 0.01 for i in range(n_bins)]
-
-    cache_ltp = MagicMock()
-    cache_ltp.speedBinCenters = est.speed_bin_centers  # must match for np.allclose check
-    cache_ltp.speedBinLatAccelFactors = cached_lafs
-    cache_ltp.speedBinFrictions = cached_frictions
-    cache_ltp.speedBinPoints = []  # wrong length, skipped
-
-    est._restore_ext_cache(cache_ltp)
-
-    for i in range(n_bins):
-      assert est.speed_bin_filtered[i]['latAccelFactor'].x == pytest.approx(cached_lafs[i])
-      assert est.speed_bin_filtered[i]['frictionCoefficient'].x == pytest.approx(cached_frictions[i])
+    lafs, frictions = in_bounds_values(est)
+    est._restore_ext_cache(_cache(), cache_CP=est.CP, cache_sp=_sp(est, lafs, frictions))
+    for i in range(len(est.speed_bin_bounds)):
+      assert est.speed_bin_filtered[i]['latAccelFactor'].x == lafs[i]
+      assert est.speed_bin_filtered[i]['frictionCoefficient'].x == frictions[i]
 
   @patch(PATCH_EXT_PARAMS)
   @patch(PATCH_PARAMS)
@@ -288,37 +281,21 @@ class TestCacheRestore:
     mock_params_cls.return_value.get.return_value = None
     _setup_ext_mock(mock_ext, speed_dep_on=True)
     est = TorqueEstimator(make_mock_CP())
-
     original_laf = est.speed_bin_filtered[0]['latAccelFactor'].x
-
-    cache_ltp = MagicMock()
-    cache_ltp.speedBinCenters = est.speed_bin_centers
-    cache_ltp.speedBinLatAccelFactors = [999.0]  # wrong length
-    cache_ltp.speedBinFrictions = [999.0]
-
-    est._restore_ext_cache(cache_ltp)
-
-    assert est.speed_bin_filtered[0]['latAccelFactor'].x == pytest.approx(original_laf)
+    lafs, frictions = in_bounds_values(est)
+    est._restore_ext_cache(_cache(), cache_CP=est.CP, cache_sp=_sp(est, lafs[:1], frictions))
+    assert est.speed_bin_filtered[0]['latAccelFactor'].x == original_laf
 
   @patch(PATCH_EXT_PARAMS)
   @patch(PATCH_PARAMS)
   def test_mismatched_friction_length_rejected(self, mock_params_cls, mock_ext):
-    """Both LAF and friction must match bin count; if only one matches, nothing is restored."""
     mock_params_cls.return_value.get.return_value = None
     _setup_ext_mock(mock_ext, speed_dep_on=True)
     est = TorqueEstimator(make_mock_CP())
-
-    n_bins = len(est.speed_bin_bounds)
     original_laf = est.speed_bin_filtered[0]['latAccelFactor'].x
-
-    cache_ltp = MagicMock()
-    cache_ltp.speedBinCenters = est.speed_bin_centers
-    cache_ltp.speedBinLatAccelFactors = [999.0] * n_bins  # correct length
-    cache_ltp.speedBinFrictions = [999.0]  # wrong length
-
-    est._restore_ext_cache(cache_ltp)
-
-    assert est.speed_bin_filtered[0]['latAccelFactor'].x == pytest.approx(original_laf)
+    lafs, frictions = in_bounds_values(est)
+    est._restore_ext_cache(_cache(), cache_CP=est.CP, cache_sp=_sp(est, lafs, frictions[:1]))
+    assert est.speed_bin_filtered[0]['latAccelFactor'].x == original_laf
 
   @patch(PATCH_EXT_PARAMS)
   @patch(PATCH_PARAMS)
@@ -326,67 +303,38 @@ class TestCacheRestore:
     mock_params_cls.return_value.get.return_value = None
     _setup_ext_mock(mock_ext, speed_dep_on=True)
     est = TorqueEstimator(make_mock_CP())
-
-    n_bins = len(est.speed_bin_bounds)
-    cached_lafs = [3.0 + i * 0.1 for i in range(n_bins)]
-    cached_frictions = [0.2 + i * 0.01 for i in range(n_bins)]
-
-    cache_ltp = MagicMock()
-    cache_ltp.speedBinCenters = est.speed_bin_centers
-    cache_ltp.speedBinLatAccelFactors = cached_lafs
-    cache_ltp.speedBinFrictions = cached_frictions
-    cache_ltp.speedBinPoints = []  # empty — points not restored, but filters are
-
-    est._restore_ext_cache(cache_ltp)
-
-    for i in range(n_bins):
-      assert est.speed_bin_filtered[i]['latAccelFactor'].x == pytest.approx(cached_lafs[i])
-      assert est.speed_bin_filtered[i]['frictionCoefficient'].x == pytest.approx(cached_frictions[i])
+    lafs, frictions = in_bounds_values(est)
+    est._restore_ext_cache(_cache(), cache_CP=est.CP, cache_sp=_sp(est, lafs, frictions))
+    for i in range(len(est.speed_bin_bounds)):
+      assert est.speed_bin_filtered[i]['latAccelFactor'].x == lafs[i]
+      assert est.speed_bin_filtered[i]['frictionCoefficient'].x == frictions[i]
+    assert all(len(b) == 0 for b in est.speed_bin_points)
 
   @patch(PATCH_EXT_PARAMS)
   @patch(PATCH_PARAMS)
-  def test_getattr_decay_fallback(self, mock_params_cls, mock_ext):
-    """_restore_ext_cache must work when self.decay is not set (init-time call order)."""
+  def test_cache_decay_used_without_estimator_decay(self, mock_params_cls, mock_ext):
     mock_params_cls.return_value.get.return_value = None
     _setup_ext_mock(mock_ext, speed_dep_on=True)
     est = TorqueEstimator(make_mock_CP())
-
-    n_bins = len(est.speed_bin_bounds)
     saved_decay = est.decay
     del est.decay
-
-    cache_ltp = MagicMock()
-    cache_ltp.speedBinCenters = est.speed_bin_centers
-    cache_ltp.speedBinLatAccelFactors = [5.0] * n_bins
-    cache_ltp.speedBinFrictions = [0.5] * n_bins
-    cache_ltp.speedBinPoints = []
-
-    est._restore_ext_cache(cache_ltp)
-
-    assert est.speed_bin_filtered[0]['latAccelFactor'].x == pytest.approx(5.0)
-    assert all(d == MIN_FILTER_DECAY for d in est.speed_bin_decays)
-
-    est.decay = saved_decay
+    try:
+      lafs, frictions = in_bounds_values(est)
+      est._restore_ext_cache(_cache(decay=MIN_FILTER_DECAY), cache_CP=est.CP, cache_sp=_sp(est, lafs, frictions))
+      assert est.speed_bin_filtered[0]['latAccelFactor'].x == lafs[0]
+      assert all(d == MIN_FILTER_DECAY for d in est.speed_bin_decays)
+    finally:
+      est.decay = saved_decay
 
   @patch(PATCH_EXT_PARAMS)
   @patch(PATCH_PARAMS)
-  def test_uses_actual_decay_when_available(self, mock_params_cls, mock_ext):
+  def test_cached_decay_overrides_estimator_decay(self, mock_params_cls, mock_ext):
     mock_params_cls.return_value.get.return_value = None
     _setup_ext_mock(mock_ext, speed_dep_on=True)
     est = TorqueEstimator(make_mock_CP())
-
-    n_bins = len(est.speed_bin_bounds)
-    est.decay = 200  # set a custom decay value
-
-    cache_ltp = MagicMock()
-    cache_ltp.speedBinCenters = est.speed_bin_centers
-    cache_ltp.speedBinLatAccelFactors = [5.0] * n_bins
-    cache_ltp.speedBinFrictions = [0.5] * n_bins
-    cache_ltp.speedBinPoints = []
-
-    est._restore_ext_cache(cache_ltp)
-
-    assert all(d == 200 for d in est.speed_bin_decays)
+    est.decay = 200
+    est._restore_ext_cache(_cache(decay=120.0), cache_CP=est.CP, cache_sp=_sp(est, *in_bounds_values(est)))
+    assert all(d == 120.0 for d in est.speed_bin_decays)
 
 
 @pytest.mark.skipif(SPEED_DEP_FINGERPRINT is None, reason="No cars in speed_dependent.toml")
@@ -476,11 +424,15 @@ class TestGetMsgWithPoints:
     est._on_torque_point(0.1, 0.3, v1)
     est._on_torque_point(0.2, 0.4, v2)
 
-    msg = est.get_msg(with_points=True)
-    ltp = msg.lateralTorqueParameters
-    assert len(ltp.speedBinPoints) == len(bounds)
-    total_points = sum(len(bin_pts) for bin_pts in ltp.speedBinPoints)
-    assert total_points >= 2
+    est._pm = FakePubMaster()
+    est.get_msg(with_points=True)
+    key, cache_bytes = mock_ext.return_value.put.call_args.args
+    assert key == LIVE_TORQUE_PARAMETERS_SP_KEY
+    with log.Event.from_bytes(cache_bytes) as evt:
+      sp = getattr(evt, LIVE_TORQUE_PARAMETERS_SP_SERVICE)
+      assert len(sp.speedBinPoints) == len(bounds)
+      assert sum(len(bin_pts) for bin_pts in sp.speedBinPoints) >= 2
+    assert len(est._pm.last().speedBinPoints) == 0
 
   @patch(PATCH_EXT_PARAMS)
   @patch(PATCH_PARAMS)
@@ -492,9 +444,10 @@ class TestGetMsgWithPoints:
     v1 = (bounds[0][0] + bounds[0][1]) / 2
     est._on_torque_point(0.1, 0.3, v1)
 
-    msg = est.get_msg(with_points=False)
-    ltp = msg.lateralTorqueParameters
-    assert len(ltp.speedBinPoints) == 0
+    est._pm = FakePubMaster()
+    est.get_msg(with_points=False)
+    assert len(est._pm.last().speedBinPoints) == 0
+    mock_ext.return_value.put.assert_not_called()
 
 
 class TestUnconfiguredCarToggleOn:
