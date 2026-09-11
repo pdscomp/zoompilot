@@ -5,8 +5,8 @@ This file is part of zoompilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 
 The speed-bin cache: upstream's LiveTorqueParameters supplies the restore key, decay and
-valid flag, the fork's LiveTorqueParametersSP the bin values and points; the guards on
-both, and the cache write that feeds them.
+valid flag, the fork's LiveTorqueParametersSP supplies per-bin validity, values and points;
+the guards on both, and the cache write that feeds them.
 """
 import numpy as np
 import pytest
@@ -28,11 +28,14 @@ def _cache(**kwargs):
   return make_cache(**kwargs).lateralTorqueParameters
 
 
-def _sp(est, lafs, frictions, points=None, centers=None, version=VERSION, seed_version=None):
+def _sp(est, lafs, frictions, points=None, centers=None, version=VERSION, seed_version=None, valid=None):
   """The fork cache keyed to this estimator's config."""
   msg = make_cache_sp(est.speed_bin_centers if centers is None else centers, lafs, frictions, points=points, version=version,
                       seed_version=est.speed_dep_seed_version if seed_version is None else seed_version)
-  return getattr(msg, LIVE_TORQUE_PARAMETERS_SP_SERVICE)
+  sp = getattr(msg, LIVE_TORQUE_PARAMETERS_SP_SERVICE)
+  if valid is not None:
+    sp.speedBinValid = list(valid)
+  return sp
 
 
 def _read_sp(cache_bytes):
@@ -263,16 +266,52 @@ class TestCacheRestore:
     else:
       assert_untouched(est, seeds)
 
-  def test_invalid_cache_keeps_seeds_but_restores_points_and_decay(self, fake_params):
-    """Upstream takes filtered values only from a valid cache, and still reloads points and
-    decay on a key match so the learner resumes with its data. Mirror both halves."""
+  @pytest.mark.parametrize("global_valid", [False, True])
+  @pytest.mark.parametrize("valid_bins", ["mixed", "none", "all"])
+  def test_bin_validity_is_independent_of_global(self, fake_params, global_valid, valid_bins):
+    est = TorqueEstimator(make_cp())
+    seeds = seed_values(est)
+    lafs, frictions = in_bounds_values(est)
+    n_bins = len(est.speed_bin_bounds)
+    flags = {
+      "mixed": [True] + [False] * (n_bins - 1),
+      "none": [False] * n_bins,
+      "all": [True] * n_bins,
+    }[valid_bins]
+    est._restore_ext_cache(
+      _cache(valid=global_valid, decay=120.0), cache_CP=est.CP,
+      cache_sp=_sp(est, lafs, frictions, _one_point_per_bin(est), valid=flags),
+    )
+    for i, valid in enumerate(flags):
+      assert est.speed_bin_filtered[i]['latAccelFactor'].x == (lafs[i] if valid else seeds[0][i])
+      assert est.speed_bin_filtered[i]['frictionCoefficient'].x == (frictions[i] if valid else seeds[1][i])
+      assert len(est.speed_bin_points[i]) == 1
+      assert est.speed_bin_decays[i] == 120.0
+      for filt in est.speed_bin_filtered[i].values():
+        assert filt.alpha == pytest.approx(DT_MDL / (120.0 + DT_MDL))
+
+  @pytest.mark.parametrize("length_delta", [-1, 0, 1])
+  def test_invalid_validity_length_rejects_whole_cache(self, fake_params, length_delta):
+    est = TorqueEstimator(make_cp())
+    seeds = seed_values(est)
+    lafs, frictions = in_bounds_values(est)
+    n = len(est.speed_bin_bounds)
+    flags = [] if length_delta == 0 else [True] * (n + length_delta)
+    est._restore_ext_cache(
+      _cache(decay=120.0), cache_CP=est.CP,
+      cache_sp=_sp(est, lafs, frictions, _one_point_per_bin(est), valid=flags),
+    )
+    assert_untouched(est, seeds)
+
+  def test_invalid_bins_keep_seeds_but_restore_points_and_decay(self, fake_params):
     est = TorqueEstimator(make_cp())
     seeds = seed_values(est)
     lafs, frictions = in_bounds_values(est)
     points = [[[0.11, 0.3]] * 2 for _ in est.speed_bin_bounds]
-
-    est._restore_ext_cache(_cache(decay=200.0, valid=False), cache_CP=est.CP, cache_sp=_sp(est, lafs, frictions, points))
-
+    est._restore_ext_cache(
+      _cache(decay=200.0, valid=False), cache_CP=est.CP,
+      cache_sp=_sp(est, lafs, frictions, points, valid=[False] * len(est.speed_bin_bounds)),
+    )
     assert_untouched(est, seeds, n_points=2, decay=200.0)
 
 
@@ -384,11 +423,18 @@ class TestCacheRestoreGolden:
     est = TorqueEstimator(CP)
     assert_untouched(est, seed_values(seed_est))
 
-  def test_invalid_cache_keeps_seeds_restores_points_and_decay(self, fake_params):
+  def test_global_invalid_cache_restores_valid_bins_points_and_decay(self, fake_params):
     CP = make_cp()
-    cache, cache_sp, seed_est = self._healthy_cache(fake_params, CP, valid=False, decay=173.25)
+    cache, cache_sp, _ = self._healthy_cache(fake_params, CP, valid=False, decay=173.25)
     est = self._restore_from(fake_params, CP, cache, cache_sp)
-    assert_untouched(est, seed_values(seed_est), n_points=3, decay=173.25)
+    lafs, frictions, points = _read_sp(cache_sp)
+    for i in range(len(est.speed_bin_bounds)):
+      assert est.speed_bin_filtered[i]['latAccelFactor'].x == lafs[i]
+      assert est.speed_bin_filtered[i]['frictionCoefficient'].x == frictions[i]
+      assert est.speed_bin_points[i].get_points()[:, [0, 2]].tolist() == points[i]
+    assert est.speed_bin_decays == [173.25] * len(est.speed_bin_bounds)
+    assert est.filtered_params['latAccelFactor'].x == CP.lateralTuning.torque.latAccelFactor
+    assert est.filtered_params['frictionCoefficient'].x == CP.lateralTuning.torque.friction
 
   def test_nan_bin_rejects_whole_cache(self, fake_params):
     CP = make_cp()

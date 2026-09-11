@@ -200,15 +200,11 @@ class TorqueEstimatorExt:
     return len(cached) == len(self.speed_bin_centers) and bool(np.allclose(cached, self.speed_bin_centers, atol=0.01))
 
   def _restore_ext_cache(self, cache_ltp=None, cache_CP=None, cache_sp=None):
-    """Restores the per-bin filters, decay and point buckets from the two caches: upstream's
-    LiveTorqueParameters supplies the restore key, decay and the valid flag; the fork's
-    LiveTorqueParametersSP supplies its own VERSION, the seed version, the bin centers, the
-    values and the points. Both must carry this car's restore key (fingerprint, tuning type,
-    offline seeds, VERSION) and the fork cache this config's seed_version and bin centers; the
-    filtered values are taken only
-    when upstream's cache was written valid, and since the bins are one tune a single bad
-    value rejects them whole. Points are restored on top when they pass their own checks, and
-    are simply skipped when they fail them. Reads from Params for whichever argument is None."""
+    """Restore bins after global/SP identity, version, shape and bounds validation.
+
+    The global cache supplies decay; SP speedBinValid controls filtered-bin values.
+    Points and decay restore independently of global-fit and per-bin validity.
+    """
     if not self.speed_binned:
       return
     try:
@@ -249,7 +245,8 @@ class TorqueEstimatorExt:
         return
       cached_lafs = list(cache_sp.speedBinLatAccelFactors)
       cached_frictions = list(cache_sp.speedBinFrictions)
-      if len(cached_lafs) != n_bins or len(cached_frictions) != n_bins:
+      cached_valid = list(cache_sp.speedBinValid)
+      if any(len(values) != n_bins for values in (cached_lafs, cached_frictions, cached_valid)):
         cloudlog.info("speed-dep: cache bin count mismatch, restarting learning")
         return
       if (not self._within_bounds(cached_lafs, self.speed_bin_lat_accel_factor_bounds)
@@ -263,13 +260,11 @@ class TorqueEstimatorExt:
       # torqued only writes a decay inside this range; the clip guards a hand-edited cache
       decay = float(np.clip(decay, MIN_FILTER_DECAY, MAX_FILTER_DECAY))
 
-      # values only from a valid cache, as upstream does for its globals
-      if cache_ltp.valid:
-        for i in range(n_bins):
+      # Global learning has a higher speed floor; each bin owns its validity.
+      for i, valid in enumerate(cached_valid):
+        if valid:
           self.speed_bin_filtered[i]['latAccelFactor'].x = cached_lafs[i]
           self.speed_bin_filtered[i]['frictionCoefficient'].x = cached_frictions[i]
-      else:
-        cloudlog.info("speed-dep: cache not valid, keeping seed values")
       cached_points = self._load_points_cache(cache_sp, n_bins)
       if cached_points is not None:
         for i in range(n_bins):
