@@ -2325,7 +2325,8 @@ struct LateralTorqueParameters @0xe61690eb0b091692 {
   useParams @12 :Bool;
   calPerc @13 :Int8;
 
-  # Speed-dependent parameters
+  # Deprecated: retained at @14–@18 for old logs and offline readers.
+  # New producers leave these empty and publish customReserved19 instead.
   speedBinCenters @14 :List(Float32);
   speedBinLatAccelFactors @15 :List(Float32);
   speedBinFrictions @16 :List(Float32);

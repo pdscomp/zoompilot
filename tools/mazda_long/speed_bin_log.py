@@ -8,9 +8,9 @@ The speed-bin torque values out of an rlog, across the 2026-09 schema move.
 
 torqued_ext publishes the bins on its own message, liveTorqueParametersSP (customReserved19
 on the wire), sent just before every lateralTorqueParameters at the same cadence. Logs from
-before that carried them as fields @14 to @18 of lateralTorqueParameters itself, which the
-current log.capnp no longer declares. Cap'n Proto keeps unknown fields on the wire, so a
-legacy message is copied out and re-read through the old layout (legacy_speed_bin.capnp).
+before that carried them as fields @14 to @18 of lateralTorqueParameters itself. Those legacy
+fields remain declared for old-log readers, while new producers leave them empty. A legacy
+message is copied out and re-read through the old layout (legacy_speed_bin.capnp).
 
 Usage in a LogReader loop:
 

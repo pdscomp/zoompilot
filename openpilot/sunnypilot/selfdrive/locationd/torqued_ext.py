@@ -25,8 +25,9 @@ DEFAULT_SPEED_BIN_BOUNDS = [(5, 8), (8, 12), (12, 18), (18, 24), (24, 29), (29, 
 DEFAULT_SPEED_BIN_CENTERS = [6.5, 10.0, 15.0, 21.0, 26.5, 32.0, 37.5]
 
 # The fork's own message and cache. The per-bin values ride on liveTorqueParametersSP, which
-# is customReserved19 on the wire (the last of sunnypilot's reserved Event slots, so log.capnp
-# stays upstream's), published beside every lateralTorqueParameters at the same cadence and
+# is customReserved19 on the wire. Legacy inline speed-bin fields remain declared for old-log
+# readers, while new producers publish bins here and leave the inline fields empty. This is
+# published beside every lateralTorqueParameters at the same cadence and
 # validity. torqued's 60 s cache write serializes the same struct, plus the per-bin point
 # buckets, into LiveTorqueParametersSP; the buckets are thousands of points and only the
 # restore path reads them, so the wire copy leaves them empty. See docs/zoompilot/lateral-tune.md.

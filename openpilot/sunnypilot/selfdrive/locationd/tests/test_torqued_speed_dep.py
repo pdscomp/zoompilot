@@ -101,13 +101,15 @@ class TestSpeedBinnedLearning:
             f"bin {j} should be empty when vego={vego}"
 
   def test_fork_message_fields(self, fake_params):
-    """The bins ride on the fork message published beside the upstream one, which stays
-    upstream's own (no speed-bin fields on lateralTorqueParameters)."""
+    """The bins ride on the fork message published beside the upstream one; legacy
+    speed-bin fields remain declared for old logs but stay empty on new events."""
     for fingerprint in SPEED_DEP_CARS:
       centers, bounds = get_car_bins(fingerprint)
       est = TorqueEstimator(make_cp(fingerprint=fingerprint))
       ltp, sp = _published(est)
-      assert not hasattr(ltp, 'speedBinCenters')
+      for field in ('speedBinCenters', 'speedBinLatAccelFactors', 'speedBinFrictions',
+                    'speedBinValid', 'speedBinPoints'):
+        assert len(getattr(ltp, field)) == 0
       assert sp.version == VERSION
       assert len(sp.speedBinCenters) == len(centers)
       assert len(sp.speedBinLatAccelFactors) == len(bounds)

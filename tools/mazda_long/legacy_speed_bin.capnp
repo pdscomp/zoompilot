@@ -1,8 +1,9 @@
 # zoompilot: the LateralTorqueParameters layout logs carried before 2026-09, when the
-# speed-bin fields lived on comma's struct as ordinals @14 to @18. The current log.capnp no
-# longer declares them; Cap'n Proto keeps unknown fields on the wire, so an old message is
-# re-read through this copy (speed_bin_log.py). The struct id is a fresh one on purpose: this
-# file is never loaded beside log.capnp.
+# speed-bin fields lived on comma's struct as ordinals @14 to @18. Those legacy fields remain
+# declared for old-log readers, while new producers publish bins on customReserved19 and leave
+# the inline fields empty. This copy preserves the old layout for offline tools
+# (speed_bin_log.py). The struct id is a fresh one on purpose: this file is never loaded
+# beside log.capnp.
 @0xd8c4b0b6a3c58e21;
 
 struct LegacyLateralTorqueParameters {
