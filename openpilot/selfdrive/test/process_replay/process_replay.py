@@ -454,7 +454,7 @@ CONFIGS = [
     proc_name="controlsd",
     pubs=["vehicleParameters", "lateralTorqueParameters", "modelV2", "selfdriveState",
           "extrinsicsCalibration", "deviceMotion", "longitudinalPlan", "carState", "carOutput",
-          "driverMonitoringState", "onroadEvents", "driverAssistance"],
+          "driverMonitoringState", "onroadEvents", "driverAssistance", "customReserved19"],
     subs=["carControl", "controlsState"],
     ignore=["logMonoTime", ],
     init_callback=get_car_params_callback,
@@ -546,7 +546,7 @@ CONFIGS = [
   ProcessConfig(
     proc_name="torqued",
     pubs=["deviceMotion", "extrinsicsCalibration", "lateralDelay", "carState", "carControl", "carOutput"],
-    subs=["lateralTorqueParameters"],
+    subs=["lateralTorqueParameters", "customReserved19"],
     ignore=["logMonoTime"],
     init_callback=get_car_params_callback,
     should_recv_callback=MessageBasedRcvCallback("deviceMotion", True),
@@ -592,13 +592,14 @@ def get_custom_params_from_lr(lr: LogIterable, initial_state: str = "first") -> 
   """
   Use this to get custom params dict based on provided logs.
   Useful when replaying following processes: calibrationd, paramsd, torqued
-  The params may be based on first or last message of given type (carParams, extrinsicsCalibration, vehicleParameters, lateralTorqueParameters) in the logs.
+  The params may be based on first or last message of given type (carParams, extrinsicsCalibration, vehicleParameters, lateralTorqueParameters, customReserved19) in the logs.
   """
 
   car_params = [m for m in lr if m.which() == "carParams"]
   extrinsics_calibration = [m for m in lr if m.which() == "extrinsicsCalibration"]
   vehicle_parameters = [m for m in lr if m.which() == "vehicleParameters"]
   torque_parameters = [m for m in lr if m.which() == "lateralTorqueParameters"]
+  torque_parameters_sp = [m for m in lr if m.which() == "customReserved19"]
 
   assert initial_state in ["first", "last"]
   msg_index = 0 if initial_state == "first" else -1
@@ -616,6 +617,8 @@ def get_custom_params_from_lr(lr: LogIterable, initial_state: str = "first") -> 
     custom_params["LiveParametersV2"] = vehicle_parameters[msg_index].as_builder().to_bytes()
   if len(torque_parameters) > 0:
     custom_params["LiveTorqueParameters"] = torque_parameters[msg_index].as_builder().to_bytes()
+  if torque_parameters_sp:
+    custom_params["LiveTorqueParametersSP"] = torque_parameters_sp[msg_index].as_builder().to_bytes()
 
   return custom_params
 
